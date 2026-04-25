@@ -2,7 +2,8 @@
 
 use super::helpers::strace;
 use crate::record::pack_row;
-use crate::sql::fetch_one_row;
+use crate::sql::{fetch_one_row, fetch_with};
+use crate::sql_param::SqlValue;
 use crate::state::{IntField, RuntimeIndex, TableMeta};
 
 pub(super) const STEP_CHUNK_SIZE: usize = 256;
@@ -19,6 +20,30 @@ pub(super) fn fetch_keyset_one(
     }
     // For MDS_RECNUM tables: SELECT [MDS_RECNUM], [F1]..[Fn] → n+1 cols; col0=recnum, cols1..n=fields.
     // For PRIMARY_INDEX tables: SELECT [F1]..[Fn] where F1==recnum_col → n cols; col0=recnum AND field[0].
+    fetch_keyset_one_inner(meta, sql, &[])
+}
+
+/// Parameterized variant of [`fetch_keyset_one`]. Used by ops on the
+/// new bind-parameter pipeline; the dead-code allow goes away as ops
+/// migrate over.
+#[allow(dead_code)]
+pub(super) fn fetch_keyset_one_with(
+    meta: &TableMeta,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(i64, Vec<u8>, Vec<String>), i32> {
+    if meta.fields.is_empty() || meta.record_length == 0 {
+        strace!("fetch_keyset_one: no fields for {}", meta.table_name);
+        return Err(20);
+    }
+    fetch_keyset_one_inner(meta, sql, params)
+}
+
+fn fetch_keyset_one_inner(
+    meta: &TableMeta,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(i64, Vec<u8>, Vec<String>), i32> {
     let recnum_is_field = meta
         .fields
         .iter()
@@ -28,9 +53,16 @@ pub(super) fn fetch_keyset_one(
     } else {
         1 + meta.fields.len()
     };
-    let row = fetch_one_row(sql, n_cols).inspect_err(|e| {
-        strace!("fetch_keyset_one err={} table={}", e, meta.table_name);
-    })?;
+    let row = if params.is_empty() {
+        fetch_one_row(sql, n_cols).inspect_err(|e| {
+            strace!("fetch_keyset_one err={} table={}", e, meta.table_name);
+        })?
+    } else {
+        let mut rows = fetch_with(sql, params, n_cols, 1).inspect_err(|e| {
+            strace!("fetch_keyset_one err={} table={}", e, meta.table_name);
+        })?;
+        rows.pop().ok_or(4)?
+    };
     let recnum = row[0].trim().parse::<i64>().unwrap_or(0);
     let fields: Vec<String> = if recnum_is_field {
         // row[0] is both the recnum value and field[0]'s value; row[1..] are fields[1..].
@@ -108,6 +140,10 @@ pub(super) fn fetch_keyset_one(
 }
 
 /// Format a field's raw text value as a SQL literal for WHERE / ORDER BY comparisons.
+///
+/// Deprecated path — used by ops still on the string-interpolation pipeline.
+/// New code should use [`col_to_sql_param`] which returns a typed `SqlValue`
+/// for backend-agnostic bind parameters.
 pub fn col_to_sql_literal(field: &crate::state::IntField, val: &str) -> String {
     match field.native_type {
         1 | 14 | 15 => val
@@ -123,6 +159,38 @@ pub fn col_to_sql_literal(field: &crate::state::IntField, val: &str) -> String {
             format!("'{}'", trimmed.replace('\'', "''"))
         }
     }
+}
+
+/// Convert a field's raw text value to a typed [`SqlValue`] suitable for
+/// binding as a query parameter. Replaces [`col_to_sql_literal`] in the
+/// parameterized op pipeline.
+///
+/// Type mapping mirrors the legacy literal renderer:
+///   1 / 14 / 15  (INT, AUTOINC, BFLOAT) → SqlValue::I64
+///   2            (FLOAT)                → SqlValue::F64
+///   everything else                     → SqlValue::Text (with trailing
+///                                          ASCII spaces trimmed, like the
+///                                          legacy renderer)
+pub fn col_to_sql_param(field: &crate::state::IntField, val: &str) -> SqlValue {
+    match field.native_type {
+        1 | 14 | 15 => {
+            let n = val.trim().parse::<i64>().unwrap_or(0);
+            SqlValue::I64(n)
+        }
+        2 => {
+            let f = val.trim().parse::<f64>().unwrap_or(0.0);
+            SqlValue::F64(f)
+        }
+        _ => SqlValue::Text(val.trim_end_matches(' ').to_string()),
+    }
+}
+
+/// Append a value to `params` and return its placeholder string for the
+/// active dialect. Convenience used by the parameterized op pipeline.
+pub fn push_param(params: &mut Vec<SqlValue>, value: SqlValue) -> String {
+    let dialect = crate::dialect::active();
+    params.push(value);
+    dialect.param_marker(params.len())
 }
 
 /// Pick an index by key_num. No fallback — returns None if no match.
@@ -243,10 +311,27 @@ pub fn build_key_where(key_cols: &[(String, String)], cmp: &str) -> String {
 }
 
 /// Build continuation WHERE predicate for GetNext/Prev.
+///
+/// The `key_cols` value-string and `last_rn` are both rendered as literals
+/// — the legacy pipeline. New code should use
+/// [`build_continuation_where_marker`] which expects placeholder markers
+/// (e.g. `"?"` or `"$1"`) and a parallel param vec maintained by the caller.
 pub fn build_continuation_where(
     key_cols: &[(String, String, bool)],
     dir: i8,
     last_rn: i64,
+    recnum_expr: &str,
+) -> String {
+    build_continuation_where_marker(key_cols, dir, &last_rn.to_string(), recnum_expr)
+}
+
+/// Parameterized variant of [`build_continuation_where`]. Each tuple's
+/// second element is a backend-specific placeholder marker, and `last_rn`
+/// is also a marker. The caller keeps the parallel param vec.
+pub fn build_continuation_where_marker(
+    key_cols: &[(String, String, bool)],
+    dir: i8,
+    last_rn_marker: &str,
     recnum_expr: &str,
 ) -> String {
     let forward = dir >= 0;
@@ -259,7 +344,7 @@ pub fn build_continuation_where(
     };
     if key_cols.is_empty() {
         let cmp = if forward { ">" } else { "<" };
-        return format!("{} {} {}", recnum_expr, cmp, last_rn);
+        return format!("{} {} {}", recnum_expr, cmp, last_rn_marker);
     }
     let n = key_cols.len();
     let mut clauses: Vec<String> = (0..n)
@@ -280,7 +365,7 @@ pub fn build_continuation_where(
     let rn_cmp = if forward { ">" } else { "<" };
     clauses.push(format!(
         "({} AND {} {} {})",
-        eq_all, recnum_expr, rn_cmp, last_rn
+        eq_all, recnum_expr, rn_cmp, last_rn_marker
     ));
     clauses.join(" OR ")
 }
