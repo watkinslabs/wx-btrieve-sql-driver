@@ -8,8 +8,10 @@
 use super::helpers::{posblk_key, strace};
 use super::sql_helpers::{build_filter_where, parse_filter_terms, TermClause};
 use crate::constants::*;
+use crate::dialect::select_with_limit;
 use crate::record::pack_row;
-use crate::sql::fetch_rows_positional;
+use crate::sql::fetch_with;
+use crate::sql_param::SqlValue;
 use crate::state::{state, TableMeta};
 use core::ffi::c_void;
 use core::ptr;
@@ -86,6 +88,7 @@ fn fetch_step_batch(
     n: usize,
     extra_where: Option<&str>,
 ) -> Result<Vec<(i64, Vec<u8>)>, i32> {
+    let dialect = crate::dialect::active();
     let rc = meta.recnum_sql_ref();
     let cols = meta.select_with_recnum();
     let tref = meta.table_ref("", "");
@@ -94,19 +97,24 @@ fn fetch_step_batch(
     } else {
         ("DESC", "<")
     };
-    let base_where = last_rn.map(|rn| format!("{} {} {}", rc, cmp, rn));
+    let mut params: Vec<SqlValue> = Vec::new();
+    let base_where = last_rn.map(|rn| {
+        params.push(SqlValue::I64(rn));
+        format!("{} {} {}", rc, cmp, dialect.param_marker(params.len()))
+    });
+    // extra_where is built by build_filter_where with embedded literals;
+    // its values are not yet parameterized — that migration lives in a
+    // future TermClause/build_filter_where rewrite. Until then it composes
+    // verbatim into the WHERE.
     let combined = match (base_where, extra_where) {
         (Some(b), Some(f)) => format!("({}) AND ({})", b, f),
         (Some(b), None) => b,
         (None, Some(f)) => f.to_string(),
         (None, None) => String::new(),
     };
-    let sql = if combined.is_empty() {
-        format!("SELECT TOP {n} {cols} FROM {tref} ORDER BY {rc} {ord_dir}")
-    } else {
-        format!("SELECT TOP {n} {cols} FROM {tref} WHERE {combined} ORDER BY {rc} {ord_dir}")
-    };
-    let rows = fetch_rows_positional(&sql, meta.fields.len() + 1, n)?;
+    let order_by = format!("{rc} {ord_dir}");
+    let sql = select_with_limit(dialect, n as u32, &cols, &tref, &combined, &order_by);
+    let rows = fetch_with(&sql, &params, meta.fields.len() + 1, n)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         if row.is_empty() {
