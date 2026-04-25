@@ -221,8 +221,10 @@ dependencies = [
  "btr-types",
  "clap",
  "odbc-api",
+ "postgres",
  "rusqlite",
  "thiserror",
+ "wxbtrv-core",
 ]
 
 [[package]]

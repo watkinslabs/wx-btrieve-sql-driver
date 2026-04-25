@@ -3,8 +3,10 @@ use btr_types::{IndexSegment, IntField, IntFile, IntIndex};
 use rusqlite::{params, Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SqlConfig {
+    /// "mssql" (default) | "postgres" | "sqlite"
+    pub backend: String,
     pub server: String,
     pub database: String,
     pub schema: String,
@@ -167,17 +169,32 @@ pub fn get_config(conn: &Connection, section: &str, key: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Read SQL Server connection details from the config table.
+/// Read connection details from the [config] section. Falls back to the
+/// legacy [MDS] section so older wxbtrv.db files (pre db-config 5)
+/// continue to work read-only.
 pub fn load_config(conn: &Connection) -> Result<SqlConfig, String> {
     let get = |key: &str| -> String {
         conn.query_row(
-            "SELECT value FROM config WHERE section='MDS' AND key=?1",
+            "SELECT value FROM config WHERE section='config' AND key=?1",
             params![key],
             |r| r.get::<_, String>(0),
         )
+        .or_else(|_| {
+            conn.query_row(
+                "SELECT value FROM config WHERE section='MDS' AND key=?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+        })
         .unwrap_or_default()
     };
+    let backend = match get("BACKEND").trim().to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => "postgres".to_string(),
+        "sqlite" | "sqlite3" => "sqlite".to_string(),
+        _ => "mssql".to_string(),
+    };
     Ok(SqlConfig {
+        backend,
         server: get("SERVER"),
         database: get("DATABASE"),
         schema: get("SCHEMA"),
@@ -189,13 +206,7 @@ pub fn load_config(conn: &Connection) -> Result<SqlConfig, String> {
 /// Load the schema for a single table by name (case-insensitive).
 /// Applies the connection schema as fallback if the table has no schema_name.
 pub fn load_table(conn: &Connection, table_name: &str) -> Result<IntFile, String> {
-    let cfg = load_config(conn).unwrap_or_else(|_| SqlConfig {
-        server: String::new(),
-        database: String::new(),
-        schema: String::new(),
-        user: String::new(),
-        password: String::new(),
-    });
+    let cfg = load_config(conn).unwrap_or_default();
 
     let upper = table_name.to_ascii_uppercase();
     let row = conn

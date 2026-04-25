@@ -10,7 +10,7 @@
 /// derived from the .B file's FCR (File Control Record) and optionally saved
 /// back to wxbtrv.db with --save-schema.
 use clap::{Parser, Subcommand};
-use odbc_api::Connection;
+use sqlsrv::SqlConnection;
 use std::path::{Path, PathBuf};
 
 mod bfile;
@@ -148,7 +148,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let cfg = schema::load_config(&conn)?;
             let coll = resolve_collation(&conn, collation.as_deref());
 
-            let sql_conn: Option<Connection<'static>> = if dry_run {
+            let mut sql_conn: Option<SqlConnection> = if dry_run {
                 None
             } else {
                 Some(sqlsrv::connect(&cfg)?)
@@ -162,7 +162,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 import_file(
                     file,
                     &int_file,
-                    sql_conn.as_ref(),
+                    &mut sql_conn,
+                    cfg.backend.as_str(),
                     create,
                     truncate,
                     dry_run,
@@ -198,7 +199,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let cfg = schema::load_config(&conn)?;
             let coll = resolve_collation(&conn, collation.as_deref());
 
-            let sql_conn: Option<Connection<'static>> = if dry_run {
+            let mut sql_conn: Option<SqlConnection> = if dry_run {
                 None
             } else {
                 Some(sqlsrv::connect(&cfg)?)
@@ -213,7 +214,8 @@ fn run(cli: Cli) -> Result<(), String> {
                         import_file(
                             file,
                             &int_file,
-                            sql_conn.as_ref(),
+                            &mut sql_conn,
+                            cfg.backend.as_str(),
                             create,
                             truncate,
                             dry_run,
@@ -352,7 +354,8 @@ fn cmd_info(path: &Path) -> Result<(), String> {
 fn import_file(
     path: &Path,
     int_file: &btr_types::IntFile,
-    sql_conn: Option<&Connection<'static>>,
+    sql_conn: &mut Option<SqlConnection>,
+    backend: &str,
     create: bool,
     truncate: bool,
     dry_run: bool,
@@ -371,15 +374,22 @@ fn import_file(
         );
     }
 
-    if let Some(conn) = sql_conn {
+    if let Some(conn) = sql_conn.as_mut() {
         if create {
-            let ddl = sqlsrv::gen_create_table(int_file, collation);
+            let ddl = sqlsrv::gen_create_table(backend, int_file, collation);
             sqlsrv::execute(conn, &ddl)
                 .map_err(|e| format!("CREATE TABLE failed for {}: {}", int_file.table_name, e))?;
         }
         if truncate {
-            let tref = sqlsrv::table_ref(int_file);
-            sqlsrv::execute(conn, &format!("TRUNCATE TABLE {}", tref))
+            let tref = sqlsrv::table_ref(backend, int_file);
+            // SQLite has no TRUNCATE; use DELETE which is equivalent for
+            // empty-tables semantics. Postgres + MSSQL accept TRUNCATE.
+            let stmt = if backend == "sqlite" {
+                format!("DELETE FROM {}", tref)
+            } else {
+                format!("TRUNCATE TABLE {}", tref)
+            };
+            sqlsrv::execute(conn, &stmt)
                 .map_err(|e| format!("TRUNCATE failed for {}: {}", int_file.table_name, e))?;
         }
     }
@@ -392,7 +402,7 @@ fn import_file(
         batch.push(row);
 
         if batch.len() >= batch_sz {
-            if let Some(conn) = sql_conn {
+            if let Some(conn) = sql_conn.as_mut() {
                 sqlsrv::batch_insert(conn, int_file, &batch, dry_run)?;
             }
             total += batch.len() as u64;
@@ -401,7 +411,7 @@ fn import_file(
     }
 
     if !batch.is_empty() {
-        if let Some(conn) = sql_conn {
+        if let Some(conn) = sql_conn.as_mut() {
             sqlsrv::batch_insert(conn, int_file, &batch, dry_run)?;
         }
         total += batch.len() as u64;
@@ -412,7 +422,7 @@ fn import_file(
         "{}: {} records → {}{}",
         path.display(),
         total,
-        sqlsrv::table_ref(int_file),
+        sqlsrv::table_ref(backend, int_file),
         mode
     );
     Ok(())

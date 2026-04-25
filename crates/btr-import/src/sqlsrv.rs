@@ -1,27 +1,74 @@
-/// sqlsrv.rs — SQL Server connection and bulk INSERT for btr-import.
+//! sqlsrv.rs — backend-agnostic connection + bulk INSERT for btr-import.
+//!
+//! Despite the name (legacy from when btr-import was MSSQL-only), this
+//! module dispatches on `cfg.backend` to drive MSSQL via odbc-api,
+//! Postgres via the postgres crate, or SQLite via rusqlite. Each path
+//! emits the appropriate dialect's DDL and parameterized INSERT.
 use crate::schema::SqlConfig;
 use btr_types::{codec::TYPE_LSTRING, sql_type, IntField, IntFile};
-use odbc_api::{Connection, ConnectionOptions, Environment};
+
+pub enum SqlConnection {
+    Mssql(odbc_api::Connection<'static>),
+    Postgres(postgres::Client),
+    Sqlite(rusqlite::Connection),
+}
+
 use std::sync::OnceLock;
 
-pub type SqlConnection = Connection<'static>;
+static ODBC_ENV: OnceLock<odbc_api::Environment> = OnceLock::new();
 
-static ENV: OnceLock<Environment> = OnceLock::new();
-
-fn env() -> &'static Environment {
-    ENV.get_or_init(|| Environment::new().expect("ODBC driver manager not available"))
+fn odbc_env() -> &'static odbc_api::Environment {
+    ODBC_ENV.get_or_init(|| odbc_api::Environment::new().expect("ODBC driver manager not available"))
 }
 
-/// Build a connection string from config.
-fn conn_str(cfg: &SqlConfig, driver: &str) -> String {
-    format!(
-        "Driver={{{driver}}};Server={};Database={};Uid={};Pwd={};Encrypt=No;TrustServerCertificate=Yes;",
-        cfg.server, cfg.database, cfg.user, cfg.password
-    )
+/// Open a connection to the configured backend.
+pub fn connect(cfg: &SqlConfig) -> Result<SqlConnection, String> {
+    match cfg.backend.as_str() {
+        "sqlite" => connect_sqlite(cfg),
+        "postgres" => connect_postgres(cfg),
+        _ => connect_mssql(cfg),
+    }
 }
 
-/// Open an ODBC connection, trying multiple driver versions.
-pub fn connect(cfg: &SqlConfig) -> Result<Connection<'static>, String> {
+fn connect_sqlite(cfg: &SqlConfig) -> Result<SqlConnection, String> {
+    let path = if cfg.database.is_empty() {
+        ":memory:".to_string()
+    } else {
+        cfg.database.clone()
+    };
+    rusqlite::Connection::open(&path)
+        .map(SqlConnection::Sqlite)
+        .map_err(|e| format!("SQLite open '{path}' failed: {e}"))
+}
+
+fn connect_postgres(cfg: &SqlConfig) -> Result<SqlConnection, String> {
+    let (host, port) = match cfg.server.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h.to_string(), Some(p.to_string())),
+        _ => (cfg.server.clone(), None),
+    };
+    let mut parts = Vec::new();
+    if !host.is_empty() {
+        parts.push(format!("host={host}"));
+    }
+    if let Some(p) = port {
+        parts.push(format!("port={p}"));
+    }
+    if !cfg.user.is_empty() {
+        parts.push(format!("user={}", cfg.user));
+    }
+    if !cfg.password.is_empty() {
+        parts.push(format!("password={}", cfg.password));
+    }
+    if !cfg.database.is_empty() {
+        parts.push(format!("dbname={}", cfg.database));
+    }
+    let cs = parts.join(" ");
+    postgres::Client::connect(&cs, postgres::NoTls)
+        .map(SqlConnection::Postgres)
+        .map_err(|e| format!("Postgres connect failed: {e}"))
+}
+
+fn connect_mssql(cfg: &SqlConfig) -> Result<SqlConnection, String> {
     let drivers = [
         "ODBC Driver 18 for SQL Server",
         "ODBC Driver 17 for SQL Server",
@@ -29,14 +76,16 @@ pub fn connect(cfg: &SqlConfig) -> Result<Connection<'static>, String> {
         "SQL Server Native Client 11.0",
         "SQL Server",
     ];
-
     let mut last_err = String::new();
     for drv in &drivers {
-        let cs = conn_str(cfg, drv);
-        match env().connect_with_connection_string(&cs, ConnectionOptions::default()) {
+        let cs = format!(
+            "Driver={{{drv}}};Server={};Database={};Uid={};Pwd={};Encrypt=No;TrustServerCertificate=Yes;",
+            cfg.server, cfg.database, cfg.user, cfg.password
+        );
+        match odbc_env().connect_with_connection_string(&cs, odbc_api::ConnectionOptions::default()) {
             Ok(c) => {
                 eprintln!("Connected via {}", drv);
-                return Ok(c);
+                return Ok(SqlConnection::Mssql(c));
             }
             Err(e) => {
                 last_err = e.to_string();
@@ -46,19 +95,40 @@ pub fn connect(cfg: &SqlConfig) -> Result<Connection<'static>, String> {
     Err(format!("cannot connect to SQL Server: {}", last_err))
 }
 
-/// Execute a DDL/DML statement (no result set expected).
-pub fn execute(conn: &SqlConnection, sql: &str) -> Result<(), String> {
-    conn.execute(sql, ())
-        .map_err(|e| format!("SQL error: {}", e))?;
-    Ok(())
+/// Execute a non-query SQL statement.
+pub fn execute(conn: &mut SqlConnection, sql: &str) -> Result<(), String> {
+    match conn {
+        SqlConnection::Mssql(c) => c
+            .execute(sql, ())
+            .map(|_| ())
+            .map_err(|e| format!("MSSQL: {e}")),
+        SqlConnection::Postgres(c) => c.batch_execute(sql).map_err(|e| {
+            let detail = e
+                .as_db_error()
+                .map(|d| format!("{}: {}", d.code().code(), d.message()))
+                .unwrap_or_else(|| format!("{e:?}"));
+            format!("Postgres: {detail}")
+        }),
+        SqlConnection::Sqlite(c) => c
+            .execute_batch(sql)
+            .map_err(|e| format!("SQLite: {e}")),
+    }
 }
 
 // ── DDL generation ─────────────────────────────────────────────────────────────
 
-fn col_def(f: &IntField, collation: &str) -> String {
+fn quote_ident(backend: &str, name: &str) -> String {
+    match backend {
+        "mssql" => format!("[{}]", name.replace(']', "]]")),
+        _ => format!("\"{}\"", name.replace('"', "\"\"")),
+    }
+}
+
+fn col_def(backend: &str, f: &IntField, collation: &str) -> String {
     let t = sql_type(f.native_type, f.length);
-    let type_str = match t {
-        "VARCHAR" => {
+    let ident = quote_ident(backend, &f.name);
+    let type_str = match (backend, t) {
+        ("mssql", "VARCHAR") => {
             let max_len = match f.native_type {
                 n if n == TYPE_LSTRING => f.length.saturating_sub(1),
                 _ => f.length,
@@ -69,56 +139,86 @@ fn col_def(f: &IntField, collation: &str) -> String {
                 format!("VARCHAR({}) COLLATE {}", max_len.max(1), collation)
             }
         }
-        "VARBINARY" => format!("VARBINARY({})", f.length.max(1)),
-        other => other.to_string(),
+        ("mssql", "VARBINARY") => format!("VARBINARY({})", f.length.max(1)),
+        ("postgres", "VARCHAR") => {
+            let max_len = match f.native_type {
+                n if n == TYPE_LSTRING => f.length.saturating_sub(1),
+                _ => f.length,
+            };
+            format!("VARCHAR({})", max_len.max(1))
+        }
+        ("postgres", "VARBINARY") => "BYTEA".to_string(),
+        ("postgres", "DATETIME") => "TIMESTAMP".to_string(),
+        ("postgres", "BIT") => "SMALLINT".to_string(),
+        ("postgres", "TINYINT") => "SMALLINT".to_string(),
+        // SQLite is type-affinity, not strict — accept the source type.
+        ("sqlite", "VARCHAR") | ("sqlite", "CHAR") | ("sqlite", "NVARCHAR") => "TEXT".to_string(),
+        ("sqlite", "VARBINARY") => "BLOB".to_string(),
+        ("sqlite", "DATETIME") | ("sqlite", "DATE") => "TEXT".to_string(),
+        ("sqlite", "BIT") | ("sqlite", "TINYINT") | ("sqlite", "SMALLINT") | ("sqlite", "INT")
+        | ("sqlite", "BIGINT") => "INTEGER".to_string(),
+        (_, other) => other.to_string(),
     };
-    format!("    [{}] {} NULL", f.name, type_str)
+    format!("    {} {} NULL", ident, type_str)
 }
 
-/// Generate a CREATE TABLE IF NOT EXISTS statement.
-///
-/// `collation` is applied to all VARCHAR columns. Pass `""` to use the database default.
-/// Common values: `"Latin1_General_CI_AS"`, `"Latin1_General_BIN"`,
-/// `"Latin1_General_CS_AS"`, `"SQL_Latin1_General_CP1_CI_AS"`,
-/// `"Latin1_General_100_CI_AS_SC_UTF8"`.
-pub fn gen_create_table(schema: &IntFile, collation: &str) -> String {
-    let table_ref = table_ref(schema);
+/// Generate a CREATE TABLE IF NOT EXISTS statement (or its MSSQL
+/// equivalent OBJECT_ID guard).
+pub fn gen_create_table(backend: &str, schema: &IntFile, collation: &str) -> String {
+    let table_ref = table_ref(backend, schema);
     let cols: Vec<String> = schema
         .fields
         .iter()
-        .map(|f| col_def(f, collation))
+        .map(|f| col_def(backend, f, collation))
         .collect();
-    format!(
-        "IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='{}')\n\
-         CREATE TABLE {} (\n{}\n)",
-        schema.table_name,
-        table_ref,
-        cols.join(",\n")
-    )
+    let body = format!("{} (\n{}\n)", table_ref, cols.join(",\n"));
+    match backend {
+        "mssql" => format!(
+            "IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='{}')\n\
+             CREATE TABLE {body}",
+            schema.table_name.replace('\'', "''")
+        ),
+        _ => format!("CREATE TABLE IF NOT EXISTS {body}"),
+    }
 }
 
-/// Generate the qualified table reference.
-/// Resolution: [db].[schema].[table] / [db].[table] / [schema].[table] / [table]
-pub fn table_ref(schema: &IntFile) -> String {
-    match (schema.db_name.is_empty(), schema.schema_name.is_empty()) {
-        (true, true) => format!("[{}]", schema.table_name),
-        (true, false) => format!("[{}].[{}]", schema.schema_name, schema.table_name),
-        (false, true) => format!("[{}].[{}]", schema.db_name, schema.table_name),
+/// Generate the qualified table reference per backend.
+/// MSSQL: [db].[schema].[table] / [db].[table] / [schema].[table] / [table]
+/// Postgres: schema.table / table (no cross-db references)
+/// SQLite: bare table name (no namespaces)
+pub fn table_ref(backend: &str, schema: &IntFile) -> String {
+    let t = quote_ident(backend, &schema.table_name);
+    if backend == "sqlite" {
+        return t;
+    }
+    let allow_db = backend != "postgres";
+    let db = if allow_db { schema.db_name.as_str() } else { "" };
+    let sc = schema.schema_name.as_str();
+    match (db.is_empty(), sc.is_empty()) {
+        (true, true) => t,
+        (true, false) => format!("{}.{}", quote_ident(backend, sc), t),
+        (false, true) => format!("{}.{}", quote_ident(backend, db), t),
         (false, false) => format!(
-            "[{}].[{}].[{}]",
-            schema.db_name, schema.schema_name, schema.table_name
+            "{}.{}.{}",
+            quote_ident(backend, db),
+            quote_ident(backend, sc),
+            t
         ),
     }
 }
 
 // ── Batch INSERT ───────────────────────────────────────────────────────────────
 
-/// Insert a batch of decoded rows.
+/// Insert a batch of decoded rows. `rows` is a slice of decoded records —
+/// each row is a Vec<(field_name, sql_literal)>. The literal form is
+/// historic; we re-render it to the active backend's parameterized form
+/// before sending.
 ///
-/// `rows` is a slice of decoded records — each row is a vec of (field_name, sql_literal).
-/// Returns the number of rows inserted.
+/// MSSQL still gets the multi-row VALUES form (legacy speed). Postgres
+/// and SQLite use prepared parameterized INSERTs since they require
+/// strict type matching that defeats string interpolation.
 pub fn batch_insert(
-    conn: &SqlConnection,
+    conn: &mut SqlConnection,
     schema: &IntFile,
     rows: &[Vec<(String, String)>],
     dry_run: bool,
@@ -126,19 +226,28 @@ pub fn batch_insert(
     if rows.is_empty() {
         return Ok(0);
     }
+    if dry_run {
+        return Ok(rows.len());
+    }
+    match conn {
+        SqlConnection::Mssql(_) => batch_insert_mssql(conn, schema, rows),
+        SqlConnection::Postgres(_) => batch_insert_postgres(conn, schema, rows),
+        SqlConnection::Sqlite(_) => batch_insert_sqlite(conn, schema, rows),
+    }
+}
 
-    let tref = table_ref(schema);
-
-    // Build column list from first row (field order is consistent)
-    let col_names: Vec<&str> = rows[0].iter().map(|(n, _)| n.as_str()).collect();
-    let col_list = col_names
+fn batch_insert_mssql(
+    conn: &mut SqlConnection,
+    schema: &IntFile,
+    rows: &[Vec<(String, String)>],
+) -> Result<usize, String> {
+    let tref = table_ref("mssql", schema);
+    let col_list = rows[0]
         .iter()
-        .map(|c| format!("[{}]", c))
+        .map(|(n, _)| format!("[{}]", n.replace(']', "]]")))
         .collect::<Vec<_>>()
         .join(", ");
-
-    // Build VALUES clause: one VALUES(...) row per record, joined with commas
-    let mut sql = format!("INSERT INTO {} ({}) VALUES\n", tref, col_list);
+    let mut sql = format!("INSERT INTO {tref} ({col_list}) VALUES\n");
     for (i, row) in rows.iter().enumerate() {
         let vals: Vec<&str> = row.iter().map(|(_, v)| v.as_str()).collect();
         sql.push_str(&format!("({})", vals.join(", ")));
@@ -146,18 +255,152 @@ pub fn batch_insert(
             sql.push_str(",\n");
         }
     }
-
-    if dry_run {
-        return Ok(rows.len());
-    }
-
-    conn.execute(&sql, ()).map_err(|e| {
+    execute(conn, &sql).map_err(|e| {
         format!(
-            "INSERT failed: {}\nSQL: {}...",
-            e,
+            "MSSQL INSERT failed: {e}\nSQL: {}...",
             &sql[..sql.len().min(400)]
         )
     })?;
-
     Ok(rows.len())
+}
+
+fn batch_insert_postgres(
+    conn: &mut SqlConnection,
+    schema: &IntFile,
+    rows: &[Vec<(String, String)>],
+) -> Result<usize, String> {
+    let tref = table_ref("postgres", schema);
+    let col_list = rows[0]
+        .iter()
+        .map(|(n, _)| format!("\"{}\"", n.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let n_cols = rows[0].len();
+    let placeholders: String = (1..=n_cols)
+        .map(|i| format!("${i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("INSERT INTO {tref} ({col_list}) VALUES ({placeholders})");
+
+    let SqlConnection::Postgres(c) = conn else {
+        unreachable!()
+    };
+    let stmt = c
+        .prepare(&sql)
+        .map_err(|e| format!("Postgres prepare failed: {e}"))?;
+    for row in rows {
+        let owned: Vec<Box<dyn postgres::types::ToSql + Sync>> = row
+            .iter()
+            .zip(schema.fields.iter())
+            .map(|((_, lit), f)| -> Box<dyn postgres::types::ToSql + Sync> {
+                boxed_pg_value_from_literal(lit, f)
+            })
+            .collect();
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            owned.iter().map(|b| b.as_ref()).collect();
+        c.execute(&stmt, refs.as_slice()).map_err(|e| {
+            let detail = e
+                .as_db_error()
+                .map(|d| format!("{}: {}", d.code().code(), d.message()))
+                .unwrap_or_else(|| format!("{e:?}"));
+            format!("Postgres INSERT failed: {detail}")
+        })?;
+    }
+    Ok(rows.len())
+}
+
+fn batch_insert_sqlite(
+    conn: &mut SqlConnection,
+    schema: &IntFile,
+    rows: &[Vec<(String, String)>],
+) -> Result<usize, String> {
+    let tref = table_ref("sqlite", schema);
+    let col_list = rows[0]
+        .iter()
+        .map(|(n, _)| format!("\"{}\"", n.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let n_cols = rows[0].len();
+    let placeholders: String = std::iter::repeat_n("?", n_cols)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("INSERT INTO {tref} ({col_list}) VALUES ({placeholders})");
+
+    let SqlConnection::Sqlite(c) = conn else {
+        unreachable!()
+    };
+    let mut stmt = c.prepare(&sql).map_err(|e| format!("SQLite prepare failed: {e}"))?;
+    for row in rows {
+        let bound: Vec<rusqlite::types::Value> = row
+            .iter()
+            .zip(schema.fields.iter())
+            .map(|((_, lit), f)| sqlite_value_from_literal(lit, f))
+            .collect();
+        stmt.execute(rusqlite::params_from_iter(bound.iter()))
+            .map_err(|e| format!("SQLite INSERT failed: {e}"))?;
+    }
+    Ok(rows.len())
+}
+
+/// Convert a legacy SQL literal string back into a typed Postgres
+/// parameter. Mirrors the type detection wxbtrv-core does in
+/// unpack_row_typed but operates on the post-formatted string.
+fn boxed_pg_value_from_literal(
+    lit: &str,
+    f: &IntField,
+) -> Box<dyn postgres::types::ToSql + Sync> {
+    if lit == "NULL" {
+        return Box::new(Option::<i32>::None);
+    }
+    // 1=INT, 14/15=AUTOINC, 6=MONEY/DECIMAL — int-ish
+    match f.native_type {
+        1 | 5 | 14 | 15 => {
+            let n: i64 = lit.trim().parse().unwrap_or(0);
+            Box::new(n)
+        }
+        2 => {
+            let v: f64 = lit.trim().parse().unwrap_or(0.0);
+            Box::new(v)
+        }
+        7 => {
+            let n: i16 = lit.trim().parse().unwrap_or(0);
+            Box::new(n)
+        }
+        3 | 4 => {
+            // dates/times come pre-quoted: 'YYYY-MM-DD' / 'HH:MM:SS'
+            let s = lit.trim().trim_start_matches('\'').trim_end_matches('\'').to_string();
+            Box::new(s)
+        }
+        _ => {
+            // STRING / ZSTRING etc. — pre-quoted text
+            let s = lit
+                .trim()
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+                .map(|s| s.replace("''", "'"))
+                .unwrap_or_else(|| lit.to_string());
+            Box::new(s)
+        }
+    }
+}
+
+fn sqlite_value_from_literal(lit: &str, f: &IntField) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    if lit == "NULL" {
+        return Value::Null;
+    }
+    match f.native_type {
+        1 | 5 | 14 | 15 => Value::Integer(lit.trim().parse().unwrap_or(0)),
+        2 => Value::Real(lit.trim().parse().unwrap_or(0.0)),
+        7 => Value::Integer(lit.trim().parse().unwrap_or(0)),
+        _ => {
+            let s = lit
+                .trim()
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+                .map(|s| s.replace("''", "'"))
+                .unwrap_or_else(|| lit.to_string());
+            Value::Text(s)
+        }
+    }
 }

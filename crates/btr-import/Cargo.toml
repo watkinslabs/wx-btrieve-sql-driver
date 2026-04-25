@@ -13,3 +13,5 @@ clap.workspace      = true
 rusqlite.workspace  = true
 odbc-api.workspace  = true
 thiserror.workspace = true
+wxbtrv-core         = { path = "../wxbtrv-core" }
+postgres            = "0.19"
