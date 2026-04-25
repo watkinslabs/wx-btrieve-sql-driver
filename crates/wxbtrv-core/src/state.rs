@@ -229,7 +229,7 @@ pub struct HandleEntry {
     /// Which index (by RuntimeIndex.num) is active for Get navigation.
     pub get_index_num: Option<u32>,
     /// SQL literals for each key segment of the last returned row (parallel to index.field_nums).
-    pub get_last_keys: Vec<String>,
+    pub get_last_keys: Vec<crate::sql_param::SqlValue>,
     /// per-segment descending flags for the active index (parallel to get_last_keys).
     pub get_last_desc: Vec<bool>,
     pub get_last_recnum: Option<i64>,

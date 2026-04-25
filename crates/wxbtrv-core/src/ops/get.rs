@@ -5,11 +5,13 @@ use super::helpers::{
     clone_meta_and_idx, keybuf_bytes, posblk_key, strace, write_data, write_key_buf,
 };
 use super::sql_helpers::{
-    build_continuation_where, build_key_where, build_order_by_cols, extract_key_vals,
-    fetch_keyset_one, index_col_refs, pick_index,
+    build_continuation_where_marker, build_key_where, build_order_by_cols, extract_key_vals,
+    fetch_keyset_one_with, index_col_refs, pick_index,
 };
 use crate::constants::*;
+use crate::dialect::select_with_limit;
 use crate::record::unpack_key_fields;
+use crate::sql_param::SqlValue;
 use crate::state::state;
 use core::ffi::c_void;
 
@@ -61,23 +63,26 @@ pub(super) fn op_get_by_key(
     key_bytes.resize(idx.key_len as usize, 0);
     let kf = unpack_key_fields(&meta.fields, idx, &key_bytes, null_wildcard);
 
+    let dialect = crate::dialect::active();
     let field_map: std::collections::HashMap<u32, &crate::state::IntField> =
         meta.fields.iter().map(|f| (f.num, f)).collect();
     let col_refs: Vec<(String, bool)> = idx
         .field_nums
         .iter()
         .zip(idx.desc.iter().copied().chain(std::iter::repeat(false)))
-        .filter_map(|(n, d)| {
-            field_map
-                .get(n)
-                .map(|f| (format!("[{}]", f.name.replace(']', "]]")), d))
-        })
+        .filter_map(|(n, d)| field_map.get(n).map(|f| (dialect.quote_ident(&f.name), d)))
         .collect();
 
+    let mut params: Vec<SqlValue> = Vec::new();
     let key_cols: Vec<(String, String)> = col_refs
         .iter()
-        .zip(kf.iter())
-        .filter_map(|((c, _), (_, opt_v))| opt_v.as_ref().map(|v| (c.clone(), v.clone())))
+        .zip(kf)
+        .filter_map(|((c, _), (_, opt_v))| {
+            opt_v.map(|v| {
+                params.push(v);
+                (c.clone(), dialect.param_marker(params.len()))
+            })
+        })
         .collect();
 
     if null_wildcard && key_cols.is_empty() {
@@ -88,11 +93,11 @@ pub(super) fn op_get_by_key(
     let order_by = build_order_by_cols(&col_refs, dir, false, &meta.recnum_sql_ref());
     let cols = meta.select_with_recnum();
     let tref = meta.table_ref("", "");
-    let sql = format!("SELECT TOP 1 {cols} FROM {tref} WHERE {where_clause} ORDER BY {order_by}");
+    let sql = select_with_limit(dialect, 1, &cols, &tref, &where_clause, &order_by);
     strace!("op_get_by_key h={} cmp={} sql={}", hid, cmp, sql);
 
     let seg_descs: Vec<bool> = col_refs.iter().map(|(_, d)| *d).collect();
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &params) {
         Ok((recnum, packed, fields)) => {
             let last_keys = extract_key_vals(&meta, idx_num, &fields);
             if let Ok(mut st) = state().lock() {
@@ -310,15 +315,13 @@ pub(super) fn op_get_first(
     let idx_num = idx.num;
     let col_refs = index_col_refs(&meta, idx_num);
     let seg_descs: Vec<bool> = col_refs.iter().map(|(_, d)| *d).collect();
+    let dialect = crate::dialect::active();
     let order_by = build_order_by_cols(&col_refs, 1, false, &meta.recnum_sql_ref());
     let cols = meta.select_with_recnum();
-    let sql = format!(
-        "SELECT TOP 1 {cols} FROM {} ORDER BY {}",
-        meta.table_ref("", ""),
-        order_by
-    );
+    let tref = meta.table_ref("", "");
+    let sql = select_with_limit(dialect, 1, &cols, &tref, "", &order_by);
     strace!("op_get_first h={} sql={}", hid, sql);
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &[]) {
         Ok((recnum, packed, fields)) => {
             let last_keys = extract_key_vals(&meta, idx_num, &fields);
             if let Ok(mut st) = state().lock() {
@@ -379,15 +382,13 @@ pub(super) fn op_get_last(
     let idx_num = idx.num;
     let col_refs = index_col_refs(&meta, idx_num);
     let seg_descs: Vec<bool> = col_refs.iter().map(|(_, d)| *d).collect();
+    let dialect = crate::dialect::active();
     let order_by = build_order_by_cols(&col_refs, -1, false, &meta.recnum_sql_ref());
     let cols = meta.select_with_recnum();
-    let sql = format!(
-        "SELECT TOP 1 {cols} FROM {} ORDER BY {}",
-        meta.table_ref("", ""),
-        order_by
-    );
+    let tref = meta.table_ref("", "");
+    let sql = select_with_limit(dialect, 1, &cols, &tref, "", &order_by);
     strace!("op_get_last h={} sql={}", hid, sql);
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &[]) {
         Ok((recnum, packed, fields)) => {
             let last_keys = extract_key_vals(&meta, idx_num, &fields);
             if let Ok(mut st) = state().lock() {
@@ -459,25 +460,32 @@ pub(super) fn op_get_next(
     let Some(idx_num) = idx_num else {
         return BTR_EOF;
     };
+    let dialect = crate::dialect::active();
     let col_refs = index_col_refs(&meta, idx_num);
     let rc = meta.recnum_sql_ref();
     let order_by = build_order_by_cols(&col_refs, 1, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
+    let mut params: Vec<SqlValue> = Vec::new();
     let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
-            .zip(last_keys.iter())
+            .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
+            .map(|((cr, val), d)| {
+                params.push(val);
+                (cr.0.clone(), dialect.param_marker(params.len()), d)
+            })
             .collect();
-        let where_clause = build_continuation_where(&key_cols, 1, rn, &rc);
-        format!("SELECT TOP 1 {cols} FROM {tref} WHERE {where_clause} ORDER BY {order_by}")
+        params.push(SqlValue::I64(rn));
+        let last_rn_marker = dialect.param_marker(params.len());
+        let where_clause = build_continuation_where_marker(&key_cols, 1, &last_rn_marker, &rc);
+        select_with_limit(dialect, 1, &cols, &tref, &where_clause, &order_by)
     } else {
-        format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {order_by}")
+        select_with_limit(dialect, 1, &cols, &tref, "", &order_by)
     };
     strace!("op_get_next h={} sql={}", hid, sql);
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &params) {
         Ok((recnum, packed, fields)) => {
             let new_keys = extract_key_vals(&meta, idx_num, &fields);
             if let Ok(mut st) = state().lock() {
@@ -546,25 +554,32 @@ pub(super) fn op_get_prev(
     let Some(idx_num) = idx_num else {
         return BTR_EOF;
     };
+    let dialect = crate::dialect::active();
     let col_refs = index_col_refs(&meta, idx_num);
     let rc = meta.recnum_sql_ref();
     let order_by = build_order_by_cols(&col_refs, -1, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
+    let mut params: Vec<SqlValue> = Vec::new();
     let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
-            .zip(last_keys.iter())
+            .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
+            .map(|((cr, val), d)| {
+                params.push(val);
+                (cr.0.clone(), dialect.param_marker(params.len()), d)
+            })
             .collect();
-        let where_clause = build_continuation_where(&key_cols, -1, rn, &rc);
-        format!("SELECT TOP 1 {cols} FROM {tref} WHERE {where_clause} ORDER BY {order_by}")
+        params.push(SqlValue::I64(rn));
+        let last_rn_marker = dialect.param_marker(params.len());
+        let where_clause = build_continuation_where_marker(&key_cols, -1, &last_rn_marker, &rc);
+        select_with_limit(dialect, 1, &cols, &tref, &where_clause, &order_by)
     } else {
-        format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {order_by}")
+        select_with_limit(dialect, 1, &cols, &tref, "", &order_by)
     };
     strace!("op_get_prev h={} sql={}", hid, sql);
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &params) {
         Ok((recnum, packed, fields)) => {
             let new_keys = extract_key_vals(&meta, idx_num, &fields);
             if let Ok(mut st) = state().lock() {

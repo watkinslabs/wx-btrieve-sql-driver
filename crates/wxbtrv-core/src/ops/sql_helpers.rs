@@ -10,6 +10,7 @@ pub(super) const STEP_CHUNK_SIZE: usize = 256;
 
 /// Fetch one row that starts with [MDS_RECNUM] followed by all field columns.
 /// Returns (recnum, packed_record, raw_field_values).
+#[allow(dead_code)]
 pub(super) fn fetch_keyset_one(
     meta: &TableMeta,
     sql: &str,
@@ -239,7 +240,7 @@ pub(super) fn extract_key_vals(
     meta: &TableMeta,
     idx_num: u32,
     field_vals: &[String],
-) -> Vec<String> {
+) -> Vec<SqlValue> {
     let Some(idx) = meta.indexes.iter().find(|ix| ix.num == idx_num) else {
         return Vec::new();
     };
@@ -253,7 +254,7 @@ pub(super) fn extract_key_vals(
         .iter()
         .filter_map(|&fnum| {
             let fi = *field_pos.get(&fnum)?;
-            Some(col_to_sql_literal(
+            Some(col_to_sql_param(
                 meta.fields.get(fi)?,
                 field_vals.get(fi)?,
             ))

@@ -8,10 +8,12 @@
 
 use super::helpers::{posblk_key, strace};
 use super::sql_helpers::{
-    build_continuation_where, build_filter_where, build_order_by_cols, extract_key_vals,
-    fetch_keyset_one, index_col_refs, parse_filter_terms, TermClause,
+    build_continuation_where_marker, build_filter_where, build_order_by_cols, extract_key_vals,
+    fetch_keyset_one_with, index_col_refs, parse_filter_terms, TermClause,
 };
 use crate::constants::*;
+use crate::dialect::select_with_limit;
+use crate::sql_param::SqlValue;
 use crate::state::{state, TableMeta};
 use core::ffi::c_void;
 use core::ptr;
@@ -119,19 +121,31 @@ fn fetch_one_extended(
     let idx_num = idx_num
         .or_else(|| meta.indexes.first().map(|ix| ix.num))
         .ok_or(BTR_EOF)?;
+    let dialect = crate::dialect::active();
     let col_refs = index_col_refs(meta, idx_num);
     let rc = meta.recnum_sql_ref();
     let order_by = build_order_by_cols(&col_refs, dir, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
+    let mut params: Vec<SqlValue> = Vec::new();
     let base_where = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
-            .zip(last_keys.iter())
+            .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
+            .map(|((cr, val), d)| {
+                params.push(val);
+                (cr.0.clone(), dialect.param_marker(params.len()), d)
+            })
             .collect();
-        Some(build_continuation_where(&key_cols, dir, rn, &rc))
+        params.push(SqlValue::I64(rn));
+        let last_rn_marker = dialect.param_marker(params.len());
+        Some(build_continuation_where_marker(
+            &key_cols,
+            dir,
+            &last_rn_marker,
+            &rc,
+        ))
     } else {
         None
     };
@@ -141,12 +155,8 @@ fn fetch_one_extended(
         (None, Some(f)) => f.to_string(),
         (None, None) => String::new(),
     };
-    let sql = if combined.is_empty() {
-        format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {order_by}")
-    } else {
-        format!("SELECT TOP 1 {cols} FROM {tref} WHERE {combined} ORDER BY {order_by}")
-    };
-    let (recnum, packed, fields) = fetch_keyset_one(meta, &sql)?;
+    let sql = select_with_limit(dialect, 1, &cols, &tref, &combined, &order_by);
+    let (recnum, packed, fields) = fetch_keyset_one_with(meta, &sql, &params)?;
     Ok((recnum, packed, fields, idx_num))
 }
 
