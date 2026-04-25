@@ -1,4 +1,5 @@
 use crate::constants::{BTR_RECORD_LOCKED, ERR_CONTEXT_FAILURE, ERR_CONTEXT_SETUP, ERR_NOT_LOADED};
+use crate::sql_param::SqlValue;
 use crate::state::{set_err, state, Backend};
 use crate::trace::{get_seq, trace};
 
@@ -337,21 +338,19 @@ pub fn abort_txn() -> Result<(), i32> {
     rc
 }
 
-/// Execute a non-query statement (INSERT / UPDATE / DELETE / DDL).
+/// Execute a non-query statement (INSERT / UPDATE / DELETE / DDL) with no
+/// bind parameters. Equivalent to `execute_with(sql, &[])` but kept as the
+/// idiomatic shorthand for DDL and other static SQL.
 pub fn execute_sql(sql: &str) -> Result<(), i32> {
+    execute_with(sql, &[])
+}
+
+/// Execute a non-query statement with bound parameters.
+pub fn execute_with(sql: &str, params: &[SqlValue]) -> Result<(), i32> {
     with_conn(|conn| match conn {
-        SqlConn::Mssql(c) => c.execute(sql, ()).map(|_| ()).map_err(|e| {
-            trace(&format!("execute_sql/mssql ERROR: {e}"));
-            set_err(ERR_CONTEXT_FAILURE)
-        }),
-        SqlConn::Postgres(c) => c.batch_execute(sql).map_err(|e| {
-            trace(&format!("execute_sql/postgres ERROR: {e}"));
-            set_err(ERR_CONTEXT_FAILURE)
-        }),
-        SqlConn::Sqlite(c) => c.execute_batch(sql).map_err(|e| {
-            trace(&format!("execute_sql/sqlite ERROR: {e}"));
-            set_err(ERR_CONTEXT_FAILURE)
-        }),
+        SqlConn::Mssql(c) => exec_mssql(c, sql, params),
+        SqlConn::Postgres(c) => exec_postgres(c, sql, params),
+        SqlConn::Sqlite(c) => exec_sqlite(c, sql, params),
     })
 }
 
@@ -466,34 +465,93 @@ fn stable_lock_key(prefix: &str, row_id: i64) -> i64 {
     h as i64
 }
 
-/// Fetch up to `limit` rows from `sql`, each row as `Vec<String>` aligned to
-/// the SELECT column list. The single canonical query helper.
+/// Fetch up to `limit` rows from `sql` with no bind parameters.
+/// Wrapper around [`fetch_with`] for static SQL.
 pub fn fetch_rows_positional(
     sql: &str,
     n_cols: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, i32> {
-    trace(&format!("fetch_rows_positional sql={}", sql));
+    fetch_with(sql, &[], n_cols, limit)
+}
+
+/// Fetch up to `limit` rows from `sql` with bound parameters. Each row is
+/// `Vec<String>` aligned to the SELECT column list. The single canonical
+/// query helper for the multi-backend rollout.
+pub fn fetch_with(
+    sql: &str,
+    params: &[SqlValue],
+    n_cols: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, i32> {
+    if params.is_empty() {
+        trace(&format!("fetch sql={}", sql));
+    } else {
+        trace(&format!(
+            "fetch sql={} params={}",
+            sql,
+            debug_params_short(params)
+        ));
+    }
     with_conn(|conn| match conn {
-        SqlConn::Mssql(c) => fetch_mssql(c, sql, n_cols, limit),
-        SqlConn::Postgres(c) => fetch_postgres(c, sql, n_cols, limit),
-        SqlConn::Sqlite(c) => fetch_sqlite(c, sql, n_cols, limit),
+        SqlConn::Mssql(c) => fetch_mssql(c, sql, params, n_cols, limit),
+        SqlConn::Postgres(c) => fetch_postgres(c, sql, params, n_cols, limit),
+        SqlConn::Sqlite(c) => fetch_sqlite(c, sql, params, n_cols, limit),
+    })
+}
+
+fn debug_params_short(params: &[SqlValue]) -> String {
+    let mut out = String::with_capacity(params.len() * 8);
+    out.push('[');
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&crate::sql_param::debug_literal(p));
+    }
+    out.push(']');
+    out
+}
+
+// ── MSSQL marshalling ────────────────────────────────────────────────────────
+
+fn exec_mssql(
+    c: &mut OdbcConn<'static>,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(), i32> {
+    let bound = bind_mssql(params);
+    let res = if bound.is_empty() {
+        c.execute(sql, ())
+    } else {
+        c.execute(sql, bound.as_slice())
+    };
+    res.map(|_| ()).map_err(|e| {
+        trace(&format!("execute/mssql ERROR: {e}"));
+        set_err(ERR_CONTEXT_FAILURE)
     })
 }
 
 fn fetch_mssql(
     c: &mut OdbcConn<'static>,
     sql: &str,
+    params: &[SqlValue],
     n_cols: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, i32> {
+    let bound = bind_mssql(params);
+    let res = if bound.is_empty() {
+        c.execute(sql, ())
+    } else {
+        c.execute(sql, bound.as_slice())
+    };
     let mut rows: Vec<Vec<String>> = Vec::new();
-    match c.execute(sql, ()) {
+    match res {
         Err(e) => {
             trace(&format!("fetch/mssql execute error: {e}"));
             return Err(set_err(ERR_CONTEXT_FAILURE));
         }
-        Ok(None) => {} // non-query
+        Ok(None) => {}
         Ok(Some(mut cursor)) => {
             while rows.len() < limit {
                 let next = cursor.next_row().map_err(|e| {
@@ -518,13 +576,61 @@ fn fetch_mssql(
     Ok(rows)
 }
 
+/// MSSQL bind: convert each SqlValue to an `odbc_api::Box<dyn InputParameter>`
+/// owned by the returned vec. The slice is `Send`+'static safe to pass to
+/// `Connection::execute` for the duration of the call.
+fn bind_mssql(params: &[SqlValue]) -> Vec<Box<dyn odbc_api::parameter::InputParameter>> {
+    use odbc_api::IntoParameter;
+    params
+        .iter()
+        .map(|v| -> Box<dyn odbc_api::parameter::InputParameter> {
+            match v {
+                SqlValue::Null => Box::new(Option::<i32>::None.into_parameter()),
+                SqlValue::Bool(b) => Box::new((*b as i32).into_parameter()),
+                SqlValue::I32(i) => Box::new((*i).into_parameter()),
+                SqlValue::I64(i) => Box::new((*i).into_parameter()),
+                SqlValue::F64(f) => Box::new((*f).into_parameter()),
+                SqlValue::Text(s) => Box::new(s.clone().into_parameter()),
+                SqlValue::Bytes(b) => Box::new(b.clone().into_parameter()),
+            }
+        })
+        .collect()
+}
+
+// ── Postgres marshalling ─────────────────────────────────────────────────────
+
+fn exec_postgres(
+    c: &mut postgres::Client,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(), i32> {
+    if params.is_empty() {
+        c.batch_execute(sql).map_err(|e| {
+            trace(&format!("execute/postgres ERROR: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        })
+    } else {
+        let bound = bind_postgres(params);
+        let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            bound.iter().map(|b| b.as_ref()).collect();
+        c.execute(sql, refs.as_slice()).map(|_| ()).map_err(|e| {
+            trace(&format!("execute/postgres ERROR: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        })
+    }
+}
+
 fn fetch_postgres(
     c: &mut postgres::Client,
     sql: &str,
+    params: &[SqlValue],
     n_cols: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, i32> {
-    let pg_rows = c.query(sql, &[]).map_err(|e| {
+    let bound = bind_postgres(params);
+    let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+        bound.iter().map(|b| b.as_ref()).collect();
+    let pg_rows = c.query(sql, refs.as_slice()).map_err(|e| {
         trace(&format!("fetch/postgres query error: {e}"));
         set_err(ERR_CONTEXT_FAILURE)
     })?;
@@ -532,9 +638,6 @@ fn fetch_postgres(
     for r in pg_rows.into_iter().take(limit) {
         let mut row = Vec::with_capacity(n_cols);
         for col in 0..n_cols {
-            // Render each column as text. postgres-types provides a generic
-            // FromSql for &str on text-castable types; for everything else
-            // we fall through to the column's textual representation.
             let v: Option<String> = r
                 .try_get::<_, Option<String>>(col)
                 .or_else(|_| r.try_get::<_, Option<&str>>(col).map(|o| o.map(String::from)))
@@ -546,20 +649,64 @@ fn fetch_postgres(
     Ok(rows)
 }
 
+fn bind_postgres(params: &[SqlValue]) -> Vec<Box<dyn postgres::types::ToSql + Sync>> {
+    params
+        .iter()
+        .map(|v| -> Box<dyn postgres::types::ToSql + Sync> {
+            match v {
+                SqlValue::Null => Box::new(Option::<i32>::None),
+                SqlValue::Bool(b) => Box::new(*b),
+                SqlValue::I32(i) => Box::new(*i),
+                SqlValue::I64(i) => Box::new(*i),
+                SqlValue::F64(f) => Box::new(*f),
+                SqlValue::Text(s) => Box::new(s.clone()),
+                SqlValue::Bytes(b) => Box::new(b.clone()),
+            }
+        })
+        .collect()
+}
+
+// ── SQLite marshalling ───────────────────────────────────────────────────────
+
+fn exec_sqlite(
+    c: &rusqlite::Connection,
+    sql: &str,
+    params: &[SqlValue],
+) -> Result<(), i32> {
+    if params.is_empty() {
+        c.execute_batch(sql).map_err(|e| {
+            trace(&format!("execute/sqlite ERROR: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        })
+    } else {
+        let bound = bind_sqlite(params);
+        c.execute(sql, rusqlite::params_from_iter(bound.iter()))
+            .map(|_| ())
+            .map_err(|e| {
+                trace(&format!("execute/sqlite ERROR: {e}"));
+                set_err(ERR_CONTEXT_FAILURE)
+            })
+    }
+}
+
 fn fetch_sqlite(
     c: &rusqlite::Connection,
     sql: &str,
+    params: &[SqlValue],
     n_cols: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, i32> {
+    let bound = bind_sqlite(params);
     let mut stmt = c.prepare(sql).map_err(|e| {
         trace(&format!("fetch/sqlite prepare error: {e}"));
         set_err(ERR_CONTEXT_FAILURE)
     })?;
-    let mut sql_rows = stmt.query([]).map_err(|e| {
-        trace(&format!("fetch/sqlite query error: {e}"));
-        set_err(ERR_CONTEXT_FAILURE)
-    })?;
+    let mut sql_rows = stmt
+        .query(rusqlite::params_from_iter(bound.iter()))
+        .map_err(|e| {
+            trace(&format!("fetch/sqlite query error: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        })?;
     let mut rows = Vec::new();
     while rows.len() < limit {
         let next = sql_rows.next().map_err(|e| {
@@ -581,6 +728,22 @@ fn fetch_sqlite(
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn bind_sqlite(params: &[SqlValue]) -> Vec<rusqlite::types::Value> {
+    use rusqlite::types::Value;
+    params
+        .iter()
+        .map(|v| match v {
+            SqlValue::Null => Value::Null,
+            SqlValue::Bool(b) => Value::Integer(if *b { 1 } else { 0 }),
+            SqlValue::I32(i) => Value::Integer(*i as i64),
+            SqlValue::I64(i) => Value::Integer(*i),
+            SqlValue::F64(f) => Value::Real(*f),
+            SqlValue::Text(s) => Value::Text(s.clone()),
+            SqlValue::Bytes(b) => Value::Blob(b.clone()),
+        })
+        .collect()
 }
 
 /// Convenience: fetch a single row or return KEY_NOT_FOUND.

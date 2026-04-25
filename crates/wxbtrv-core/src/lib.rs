@@ -11,6 +11,7 @@ pub mod opcode_map;
 pub mod ops;
 pub mod record;
 pub mod sql;
+pub mod sql_param;
 pub mod sqlite_meta;
 pub mod state;
 pub mod table_lookup;

@@ -39,6 +39,10 @@ pub trait Dialect {
     /// Concatenation operator used in expressions: `+` on MSSQL, `||` elsewhere.
     fn concat_op(&self) -> &'static str;
 
+    /// Bind-parameter placeholder for the `idx`-th parameter (1-based).
+    /// MSSQL & SQLite use `?`; Postgres uses `$N`.
+    fn param_marker(&self, idx: usize) -> String;
+
     /// Backend-flavored `BEGIN TRANSACTION`. Used by op 19 (Begin Transaction).
     fn begin_txn(&self) -> &'static str {
         "BEGIN TRANSACTION"
@@ -76,6 +80,9 @@ impl Dialect for MssqlDialect {
     fn concat_op(&self) -> &'static str {
         "+"
     }
+    fn param_marker(&self, _idx: usize) -> String {
+        "?".to_string()
+    }
 }
 
 impl Dialect for PostgresDialect {
@@ -96,6 +103,9 @@ impl Dialect for PostgresDialect {
     fn concat_op(&self) -> &'static str {
         "||"
     }
+    fn param_marker(&self, idx: usize) -> String {
+        format!("${idx}")
+    }
 }
 
 impl Dialect for SqliteDialect {
@@ -113,6 +123,9 @@ impl Dialect for SqliteDialect {
     }
     fn concat_op(&self) -> &'static str {
         "||"
+    }
+    fn param_marker(&self, _idx: usize) -> String {
+        "?".to_string()
     }
     fn begin_txn(&self) -> &'static str {
         // SQLite ignores the BEGIN TRANSACTION wording but accepts it.
