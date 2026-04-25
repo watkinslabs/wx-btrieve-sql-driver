@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are reported by the Lint job but do not block builds while
+  # the wxbtrv-core split is still settling.
+
+jobs:
+  # ── Host-native: core rlib + test harness + unit tests ───────────────────
+  test:
+    name: Tests (Linux + SQL Server)
+    # Pinned to 22.04 because the test harness uses "ODBC Driver 17 for
+    # SQL Server" and Microsoft only ships msodbcsql17 / mssql-tools for
+    # Ubuntu 22.04. ubuntu-latest (now 24.04) only has driver 18.
+    runs-on: ubuntu-22.04
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: WxTest!2024
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        # No --health-cmd: the 2022-latest image ships sqlcmd at
+        # /opt/mssql-tools18/bin/ but path varies across image revisions.
+        # The "Wait for SQL Server" step below polls from the runner side.
+
+    env:
+      BTR_TEST_SERVER: localhost,1433
+      BTR_TEST_USER: sa
+      BTR_TEST_PASS: WxTest!2024
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ODBC Driver 17 for SQL Server
+        run: |
+          set -euxo pipefail
+          # ubuntu-22.04 runners ship Microsoft's apt source pre-installed.
+          # Adding our own conflicts with Signed-By, so just install directly.
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17 unixodbc-dev mssql-tools
+          echo 'export PATH="$PATH:/opt/mssql-tools/bin"' | sudo tee -a /etc/profile.d/mssql.sh
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Wait for SQL Server
+        run: |
+          for i in {1..30}; do
+            if /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P WxTest!2024 -Q "SELECT 1" -C > /dev/null 2>&1; then
+              echo "SQL Server is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "SQL Server failed to become ready"
+          exit 1
+
+      - name: Bootstrap fixture database
+        run: |
+          /opt/mssql-tools/bin/sqlcmd \
+            -S localhost -U sa -P WxTest!2024 -C \
+            -i crates/btr-test-harness/fixtures/schema.sql
+
+      - name: Build wxbtrv-core
+        run: cargo build -p wxbtrv-core
+
+      - name: Run integration test suite
+        run: cargo test -p btr-test-harness -- --test-threads=1
+
+  # ── Windows cross-build: production DLL ──────────────────────────────────
+  cross-build-dll:
+    name: Cross-build wxbtrv.dll
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-i686
+
+      - name: Rust toolchain (with i686-pc-windows-gnu target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-cross-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-cross-${{ runner.os }}-
+
+      - name: Build wxbtrv.dll (release, i686)
+        run: cargo build -p wxbtrv --release --target i686-pc-windows-gnu
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxbtrv-dll-release
+          path: target/i686-pc-windows-gnu/release/wxbtrv.dll
+
+  # ── Lint: format + clippy on host target ─────────────────────────────────
+  lint:
+    name: Format + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: rustfmt --check
+        run: cargo fmt --all -- --check
+      - name: Clippy (wxbtrv-core, advisory)
+        run: cargo clippy -p wxbtrv-core
+        continue-on-error: true

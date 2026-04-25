@@ -1,0 +1,28 @@
+[workspace]
+# Standalone — kept out of the parent workspace because libfuzzer-sys
+# requires nightly + sanitizers and would break stable CI builds.
+
+[package]
+name = "wxbtrv-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wxbtrv-core = { path = ".." }
+
+[[bin]]
+name = "unpack_row"
+path = "fuzz_targets/unpack_row.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pack_row"
+path = "fuzz_targets/pack_row.rs"
+test = false
+doc = false

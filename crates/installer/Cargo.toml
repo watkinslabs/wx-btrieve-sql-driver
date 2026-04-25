@@ -1,0 +1,11 @@
+[package]
+name    = "installer"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "installer"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }

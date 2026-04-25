@@ -1,0 +1,11 @@
+[package]
+name    = "wxbtrv-sys"
+version.workspace = true
+edition.workspace = true
+build   = "build.rs"
+
+# This crate assembles wxbtrv.sys (16-bit DOS device driver) using NASM.
+# Output path is emitted as WXBTRV_SYS_PATH for use by the installer.
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,15 @@
+[package]
+name    = "wxbtrv"
+version.workspace = true
+edition.workspace = true
+build   = "build.rs"
+
+[lib]
+name       = "wxbtrv"
+crate-type = ["cdylib"]
+
+[dependencies]
+wxbtrv-core          = { path = "../wxbtrv-core" }
+btr-types.workspace  = true
+odbc-api.workspace   = true
+rusqlite.workspace   = true

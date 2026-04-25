@@ -1,0 +1,13 @@
+[package]
+name    = "btr-test-harness"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "btr_test_harness"
+path = "src/lib.rs"
+
+[dependencies]
+wxbtrv-core = { path = "../wxbtrv-core" }
+odbc-api    = { workspace = true }
+rusqlite    = { workspace = true }

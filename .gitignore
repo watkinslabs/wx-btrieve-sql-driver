@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target/
+crates/*/target/
+
+# .NET build artifacts
+tools/**/bin/
+tools/**/obj/
+tools/**/out/
+
+# Private tools — never commit
+crates/rtool/
+
+# Secrets — never commit real config
+*.INI
+*.ini
+!config/*.example
+!config/*.ini.example
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local-only Claude Code instructions (contains internal hostnames + creds)
+CLAUDE.md
+!CLAUDE.example.md
+
+# Working dirs that hold generated/scratch output, not committed sources
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

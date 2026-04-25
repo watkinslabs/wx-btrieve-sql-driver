@@ -1,0 +1,15 @@
+[package]
+name    = "btr-import"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "btr-import"
+path = "src/main.rs"
+
+[dependencies]
+btr-types.workspace = true
+clap.workspace      = true
+rusqlite.workspace  = true
+odbc-api.workspace  = true
+thiserror.workspace = true

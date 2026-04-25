@@ -1,0 +1,14 @@
+LIBRARY ntvdm.exe
+EXPORTS
+    getCX
+    getDX
+    getDS
+    getDI
+    getSI
+    getAX
+    getBX
+    getES
+    setBX
+    setAX
+    setCF
+    MGetVdmPointer

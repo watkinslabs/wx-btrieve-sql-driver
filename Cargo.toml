@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/btr-types",
+    "crates/wxbtrv-core",
+    "crates/wxbtrv",
+    "crates/db-config",
+    "crates/btr-import",
+    "crates/wxbtrv-sys",
+    "crates/installer",
+    "crates/btr-test-harness",
+]
+# rtool is intentionally NOT a workspace member — it's private and gitignored
+# Fuzz crates depend on libfuzzer-sys (nightly + sanitizers); keep them out of
+# the workspace so `cargo build --workspace` stays on stable toolchains.
+exclude = ["crates/wxbtrv-core/fuzz"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+btr-types  = { path = "crates/btr-types" }
+des        = "0.8"
+cipher     = "0.4"
+clap       = { version = "4", features = ["derive"] }
+rusqlite   = { version = "0.31", features = ["bundled"] }
+thiserror  = "1"
+odbc-api   = "6"
+rpassword  = "7"

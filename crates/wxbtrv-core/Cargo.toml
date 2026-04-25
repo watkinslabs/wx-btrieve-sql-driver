@@ -1,0 +1,20 @@
+[package]
+name    = "wxbtrv-core"
+version.workspace = true
+edition.workspace = true
+build   = "build.rs"
+
+[lib]
+name = "wxbtrv_core"
+
+[dependencies]
+odbc-api.workspace   = true
+rusqlite.workspace   = true
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hot_paths"
+harness = false
