@@ -1,9 +1,11 @@
 //! Position / direct access ops — 22 GetPosition, 23 GetDirect, 44 GetPercent, 45 FindPercent.
 
 use super::helpers::{clone_table_meta, posblk_key, strace, write_data};
-use super::sql_helpers::{extract_key_vals, fetch_keyset_one};
+use super::sql_helpers::{extract_key_vals, fetch_keyset_one_with};
 use crate::constants::*;
-use crate::sql::fetch_rows_positional;
+use crate::dialect::{select_with_limit, LimitKind};
+use crate::sql::fetch_with;
+use crate::sql_param::SqlValue;
 use crate::state::state;
 use core::ffi::c_void;
 
@@ -87,12 +89,15 @@ pub(super) fn op_get_direct(
     }
     let recnum =
         u32::from_le_bytes([pos_bytes[0], pos_bytes[1], pos_bytes[2], pos_bytes[3]]) as i64;
+    let dialect = crate::dialect::active();
     let cols = meta.select_with_recnum();
     let tref = meta.table_ref("", "");
-    let rc = &meta.recnum_col;
-    let sql = format!("SELECT TOP 1 {cols} FROM {tref} WHERE [{rc}] = {recnum}");
+    let rc = meta.recnum_sql_ref();
+    let where_clause = format!("{} = {}", rc, dialect.param_marker(1));
+    let sql = select_with_limit(dialect, 1, &cols, &tref, &where_clause, "");
+    let params = vec![SqlValue::I64(recnum)];
     strace!("op_get_direct h={} rn={} sql={}", hid, recnum, sql);
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &params) {
         Ok((rn, packed, fields)) => {
             let idx_num = state()
                 .lock()
@@ -151,18 +156,22 @@ pub(super) fn op_get_percent(
         };
         (h.meta.clone(), h.last_recnum)
     };
+    let dialect = crate::dialect::active();
     let tref = meta.table_ref("", "");
     let rc = meta.recnum_sql_ref();
     let (before, total) = if let Some(rn) = last_rn {
-        let sql_b = format!("SELECT COUNT(*) FROM {tref} WHERE {rc} <= {rn}");
+        let sql_b = format!(
+            "SELECT COUNT(*) FROM {tref} WHERE {rc} <= {}",
+            dialect.param_marker(1)
+        );
         let sql_t = format!("SELECT COUNT(*) FROM {tref}");
-        let b: i64 = fetch_rows_positional(&sql_b, 1, 1)
+        let b: i64 = fetch_with(&sql_b, &[SqlValue::I64(rn)], 1, 1)
             .ok()
             .and_then(|r| r.into_iter().next())
             .and_then(|r| r.into_iter().next())
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
-        let t: i64 = fetch_rows_positional(&sql_t, 1, 1)
+        let t: i64 = fetch_with(&sql_t, &[], 1, 1)
             .ok()
             .and_then(|r| r.into_iter().next())
             .and_then(|r| r.into_iter().next())
@@ -231,11 +240,12 @@ pub(super) fn op_find_percent(
         0
     };
 
+    let dialect = crate::dialect::active();
     let tref = meta.table_ref("", "");
     let rc = meta.recnum_sql_ref();
 
     let count_sql = format!("SELECT COUNT(*) FROM {tref}");
-    let total: i64 = fetch_rows_positional(&count_sql, 1, 1)
+    let total: i64 = fetch_with(&count_sql, &[], 1, 1)
         .ok()
         .and_then(|r| r.into_iter().next())
         .and_then(|r| r.into_iter().next())
@@ -246,16 +256,31 @@ pub(super) fn op_find_percent(
         return BTR_EOF;
     }
 
-    let offset = ((pct as i64 * total) / 10000).min(total - 1).max(0);
+    let offset = ((pct as i64 * total) / 10000).clamp(0, total - 1);
     let cols = meta.select_with_recnum();
-    let sql = if offset == 0 {
-        format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {rc} ASC")
-    } else {
-        format!(
-            "SELECT TOP 1 {cols} FROM \
-             (SELECT {cols}, ROW_NUMBER() OVER (ORDER BY {rc} ASC) AS _rn FROM {tref}) _t \
-             WHERE _rn > {offset} ORDER BY _rn ASC"
+    let order_by = format!("{rc} ASC");
+    let (sql, params) = if offset == 0 {
+        (
+            select_with_limit(dialect, 1, &cols, &tref, "", &order_by),
+            vec![],
         )
+    } else {
+        // Offset + limit via ROW_NUMBER() — works on MSSQL/Postgres/SQLite (3.25+).
+        let inner_select_top = match dialect.limit_kind() {
+            LimitKind::SelectTop => "SELECT TOP 1 ".to_string(),
+            LimitKind::LimitSuffix => "SELECT ".to_string(),
+        };
+        let inner_limit_suffix = match dialect.limit_kind() {
+            LimitKind::SelectTop => "",
+            LimitKind::LimitSuffix => " LIMIT 1",
+        };
+        let sql = format!(
+            "{inner_select_top}{cols} FROM \
+             (SELECT {cols}, ROW_NUMBER() OVER (ORDER BY {rc} ASC) AS _rn FROM {tref}) _t \
+             WHERE _rn > {} ORDER BY _rn ASC{inner_limit_suffix}",
+            dialect.param_marker(1)
+        );
+        (sql, vec![SqlValue::I64(offset)])
     };
     strace!(
         "op_find_percent h={} pct={} offset={} sql={}",
@@ -265,7 +290,7 @@ pub(super) fn op_find_percent(
         sql
     );
 
-    match fetch_keyset_one(&meta, &sql) {
+    match fetch_keyset_one_with(&meta, &sql, &params) {
         Ok((recnum, packed, _)) => {
             write_data(data_buf, data_len, &packed);
             if let Ok(mut st) = state().lock() {
