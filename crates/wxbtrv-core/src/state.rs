@@ -190,7 +190,13 @@ impl TableMeta {
             return t;
         }
 
-        let db = if db_override.is_empty() {
+        // Postgres has no cross-DB 3-part naming; the connection's dbname
+        // is implicit. Drop the db component and emit at most schema.table.
+        let allow_db = backend != Backend::Postgres;
+
+        let db = if !allow_db {
+            ""
+        } else if db_override.is_empty() {
             self.db_name.as_str()
         } else {
             db_override

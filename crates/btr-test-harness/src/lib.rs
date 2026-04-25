@@ -23,11 +23,12 @@ pub const TEST_DB_NAME: &str = "WXBTRV_TEST";
 pub const TEST_TABLE: &str = "TEST_CUST";
 
 /// Backend the harness drives. Set via `BTR_TEST_BACKEND` env
-/// (`mssql` | `sqlite`). Defaults to `mssql` for back-compat.
+/// (`mssql` | `sqlite` | `postgres`). Defaults to `mssql` for back-compat.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HarnessBackend {
     Mssql,
     Sqlite,
+    Postgres,
 }
 
 pub fn current_backend() -> HarnessBackend {
@@ -38,6 +39,7 @@ pub fn current_backend() -> HarnessBackend {
         .as_str()
     {
         "sqlite" | "sqlite3" => HarnessBackend::Sqlite,
+        "postgres" | "postgresql" | "pg" => HarnessBackend::Postgres,
         _ => HarnessBackend::Mssql,
     }
 }
@@ -79,6 +81,35 @@ fn schema_sql_path() -> PathBuf {
 
 fn schema_sqlite_path() -> PathBuf {
     fixtures_dir().join("schema_sqlite.sql")
+}
+
+fn schema_postgres_path() -> PathBuf {
+    fixtures_dir().join("schema_postgres.sql")
+}
+
+/// Postgres connection settings, picked from env. Defaults match the
+/// docker container in scripts/test-setup-postgres.sh:
+///   host=localhost  port=15432  user=postgres  password=WxTest2024
+///   db=wxbtrv_test
+fn pg_conn_str() -> String {
+    let host = std::env::var("BTR_PG_HOST").unwrap_or_else(|_| "localhost".into());
+    let port = std::env::var("BTR_PG_PORT").unwrap_or_else(|_| "15432".into());
+    let user = std::env::var("BTR_PG_USER").unwrap_or_else(|_| "postgres".into());
+    let pass = std::env::var("BTR_PG_PASS").unwrap_or_else(|_| "WxTest2024".into());
+    let db = std::env::var("BTR_PG_DB").unwrap_or_else(|_| "wxbtrv_test".into());
+    format!("host={host} port={port} user={user} password={pass} dbname={db}")
+}
+
+/// Reset the Postgres fixture: apply schema_postgres.sql via the postgres
+/// crate (with NoTls — local docker test container).
+pub fn reset_postgres_fixture() {
+    wxbtrv_core::sql::reset_connection();
+    let mut client = postgres::Client::connect(&pg_conn_str(), postgres::NoTls)
+        .expect("connect to test postgres");
+    let sql = std::fs::read_to_string(schema_postgres_path())
+        .expect("failed to read fixtures/schema_postgres.sql");
+    client.batch_execute(&sql).expect("apply postgres fixture");
+    drop(client);
 }
 
 /// Reset the SQL Server fixture: run schema.sql against master.
@@ -233,12 +264,17 @@ pub fn build_fixture_wxbtrv_db() -> PathBuf {
 
     // The harness still records a SERVER value in the table-row metadata
     // even on SQLite (it's just text in btr_tables.server_name). For
-    // SQLite we use the .sqlite path; for MSSQL the real server string.
+    // SQLite we use the .sqlite path; for MSSQL/Postgres the host string.
     let server = match current_backend() {
         HarnessBackend::Mssql => {
             std::env::var("BTR_TEST_SERVER").unwrap_or_else(|_| "localhost,1433".into())
         }
         HarnessBackend::Sqlite => sqlite_fixture_path().to_string_lossy().into_owned(),
+        HarnessBackend::Postgres => {
+            let host = std::env::var("BTR_PG_HOST").unwrap_or_else(|_| "localhost".into());
+            let port = std::env::var("BTR_PG_PORT").unwrap_or_else(|_| "15432".into());
+            format!("{host}:{port}")
+        }
     };
 
     let cfg_owned: Vec<(&'static str, String)> = match current_backend() {
@@ -261,13 +297,26 @@ pub fn build_fixture_wxbtrv_db() -> PathBuf {
             ]
         }
         HarnessBackend::Sqlite => {
-            // SQLite has no logical database namespace — DATABASE is the
-            // .sqlite file path; we keep the [config] DATABASE empty so
-            // the table-lookup path doesn't try to scope by db, and stash
-            // the path in PATH for the connection layer to find via state.
+            // SQLite has no logical database namespace; DATABASE is the
+            // .sqlite file path.
             vec![
                 ("BACKEND", "sqlite".to_string()),
                 ("DATABASE", server.clone()),
+                ("RECNUM_COLUMN", "MDS_RECNUM".to_string()),
+            ]
+        }
+        HarnessBackend::Postgres => {
+            let user = std::env::var("BTR_PG_USER").unwrap_or_else(|_| "postgres".into());
+            let pass = std::env::var("BTR_PG_PASS").unwrap_or_else(|_| "WxTest2024".into());
+            let db = std::env::var("BTR_PG_DB").unwrap_or_else(|_| "wxbtrv_test".into());
+            vec![
+                ("BACKEND", "postgres".to_string()),
+                ("SERVER", server.clone()),
+                ("DATABASE", db),
+                ("USER", user),
+                ("PASSWORD", pass),
+                ("ENCRYPT", "no".to_string()),
+                ("TRUST_SERVER_CERTIFICATE", "no".to_string()),
                 ("RECNUM_COLUMN", "MDS_RECNUM".to_string()),
             ]
         }
@@ -288,14 +337,19 @@ pub fn build_fixture_wxbtrv_db() -> PathBuf {
     //  off 60  BALANCE    DECIMAL 8   (i64 LE — wxbtrv-core treats DECIMAL as int)
     //  off 68  ACTIVE     LOGICAL 1
     //  off 69  CREATED    DATE    4
+    let (schema_name, db_name) = match current_backend() {
+        HarnessBackend::Mssql => ("dbo", TEST_DB_NAME),
+        HarnessBackend::Sqlite => ("", ""),
+        HarnessBackend::Postgres => ("public", ""),
+    };
     conn.execute(
         "INSERT INTO btr_tables
             (table_name, schema_name, db_name, record_length, page_size, file_flags,
              ignore_null_values, trim_string_fields, translate_oem_to_ansi,
              primary_index, local_cache, driver_name, server_name,
              permanent_int, number_df_fields, source_file, source_path, source_dir)
-         VALUES (?1, 'dbo', ?2, 73, 4096, 0, 1, 1, 0, NULL, 0, 'SQL_BTR', ?3, 0, 7, '', '', '')",
-        params![TEST_TABLE, TEST_DB_NAME, server],
+         VALUES (?1, ?4, ?2, 73, 4096, 0, 1, 1, 0, NULL, 0, 'SQL_BTR', ?3, 0, 7, '', '', '')",
+        params![TEST_TABLE, db_name, server, schema_name],
     )
     .unwrap();
     let table_id = conn.last_insert_rowid();
@@ -367,20 +421,26 @@ fn insert_table(
     primary_index: Option<i64>,
     number_df_fields: i64,
 ) -> i64 {
+    let (schema_name, db_name) = match current_backend() {
+        HarnessBackend::Mssql => ("dbo", TEST_DB_NAME),
+        HarnessBackend::Sqlite => ("", ""),
+        HarnessBackend::Postgres => ("public", ""),
+    };
     conn.execute(
         "INSERT INTO btr_tables
             (table_name, schema_name, db_name, record_length, page_size, file_flags,
              ignore_null_values, trim_string_fields, translate_oem_to_ansi,
              primary_index, local_cache, driver_name, server_name,
              permanent_int, number_df_fields, source_file, source_path, source_dir)
-         VALUES (?1, 'dbo', ?2, ?3, 4096, 0, 1, 1, 0, ?4, 0, 'SQL_BTR', ?5, 0, ?6, '', '', '')",
+         VALUES (?1, ?7, ?2, ?3, 4096, 0, 1, 1, 0, ?4, 0, 'SQL_BTR', ?5, 0, ?6, '', '', '')",
         params![
             table_name,
-            TEST_DB_NAME,
+            db_name,
             record_length,
             primary_index,
             server,
-            number_df_fields
+            number_df_fields,
+            schema_name
         ],
     )
     .unwrap();
@@ -497,6 +557,7 @@ pub fn reset_fixture() -> PathBuf {
     match current_backend() {
         HarnessBackend::Mssql => reset_sql_fixture(),
         HarnessBackend::Sqlite => reset_sqlite_fixture(),
+        HarnessBackend::Postgres => reset_postgres_fixture(),
     }
     let db = build_fixture_wxbtrv_db();
     install_fixture_config(&db);

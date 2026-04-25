@@ -11,3 +11,4 @@ path = "src/lib.rs"
 wxbtrv-core = { path = "../wxbtrv-core" }
 odbc-api    = { workspace = true }
 rusqlite    = { workspace = true }
+postgres    = "0.19"

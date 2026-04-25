@@ -19,10 +19,14 @@ pub fn get_table_meta_for_path(name: &str, path: &str) -> Option<TableMeta> {
         return None;
     }
 
-    // SQLite has no logical-database namespace — there's a single .sqlite
-    // file per session, so always do the plain (un-scoped) name lookup.
+    // SQLite has no logical-database namespace, and Postgres has no
+    // cross-DB queries (the connection's dbname is implicit). Both run
+    // un-scoped name lookup; only MSSQL needs the [db]:[name] mapping.
     let backend = state().lock().map(|s| s.backend).ok();
-    let bypass_db = matches!(backend, Some(crate::state::Backend::Sqlite));
+    let bypass_db = matches!(
+        backend,
+        Some(crate::state::Backend::Sqlite) | Some(crate::state::Backend::Postgres)
+    );
 
     // Resolve database scope: directory config first, then global fallback.
     let dir = crate::state::dir_from_path(path);

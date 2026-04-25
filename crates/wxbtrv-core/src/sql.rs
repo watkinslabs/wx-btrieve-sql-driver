@@ -661,22 +661,247 @@ fn fetch_postgres(
     let refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
         bound.iter().map(|b| b.as_ref()).collect();
     let pg_rows = c.query(sql, refs.as_slice()).map_err(|e| {
-        trace(&format!("fetch/postgres query error: {e}"));
+        let detail = e
+            .as_db_error()
+            .map(|d| format!("{}: {}", d.code().code(), d.message()))
+            .unwrap_or_else(|| format!("{e:?}"));
+        trace(&format!("fetch/postgres query error: {detail}"));
         set_err(ERR_CONTEXT_FAILURE)
     })?;
     let mut rows = Vec::with_capacity(pg_rows.len().min(limit));
     for r in pg_rows.into_iter().take(limit) {
         let mut row = Vec::with_capacity(n_cols);
         for col in 0..n_cols {
-            let v: Option<String> = r
-                .try_get::<_, Option<String>>(col)
-                .or_else(|_| r.try_get::<_, Option<&str>>(col).map(|o| o.map(String::from)))
-                .unwrap_or_else(|_| Some(format!("{:?}", r.columns().get(col))));
-            row.push(v.unwrap_or_default());
+            row.push(pg_col_to_string(&r, col));
         }
         rows.push(row);
     }
     Ok(rows)
+}
+
+/// Read a postgres column as a String regardless of its underlying type.
+/// Each branch matches the column's pg type and converts to text. Mirrors
+/// the type list in PgInt / PgText so the round-trip stays lossless for
+/// the column types the runtime cares about.
+fn pg_col_to_string(row: &postgres::Row, col: usize) -> String {
+    use postgres::types::Type;
+    let cols = row.columns();
+    let Some(c) = cols.get(col) else {
+        return String::new();
+    };
+    let ty = c.type_();
+    match *ty {
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => row
+            .try_get::<_, Option<String>>(col)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        Type::INT2 => row
+            .try_get::<_, Option<i16>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        Type::INT4 => row
+            .try_get::<_, Option<i32>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        Type::INT8 => row
+            .try_get::<_, Option<i64>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        Type::FLOAT4 => row
+            .try_get::<_, Option<f32>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        Type::FLOAT8 => row
+            .try_get::<_, Option<f64>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        Type::BOOL => row
+            .try_get::<_, Option<bool>>(col)
+            .ok()
+            .flatten()
+            .map(|v| if v { "1".to_string() } else { "0".to_string() })
+            .unwrap_or_default(),
+        Type::DATE => row
+            .try_get::<_, Option<chrono::NaiveDate>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        Type::TIME => row
+            .try_get::<_, Option<chrono::NaiveTime>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.format("%H:%M:%S").to_string())
+            .unwrap_or_default(),
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => row
+            .try_get::<_, Option<chrono::NaiveDateTime>>(col)
+            .ok()
+            .flatten()
+            .map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Postgres ToSql adapter for SQL NULL that accepts any column type.
+/// `Option::<T>::None` is type-checked in postgres, so binding NULL with
+/// the wrong T (e.g. None::<i32> for a DATE column) fails. This adapter
+/// accepts every type and always writes IsNull::Yes.
+#[derive(Debug)]
+struct PgNull;
+
+impl postgres::types::ToSql for PgNull {
+    fn to_sql(
+        &self,
+        _ty: &postgres::types::Type,
+        _out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(postgres::types::IsNull::Yes)
+    }
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        true
+    }
+    postgres::types::to_sql_checked!();
+}
+
+/// Postgres ToSql adapter that accepts any integer column type
+/// (INT2/INT4/INT8) and serializes the held i64 in the target's width.
+/// Built-in `i64::ToSql` only accepts `INT8`, so binding a Btrieve INT
+/// to a SMALLINT/INTEGER column would fail without this.
+#[derive(Debug)]
+struct PgInt(i64);
+
+impl postgres::types::ToSql for PgInt {
+    fn to_sql(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        use postgres::types::Type;
+        match *ty {
+            Type::INT2 => (self.0 as i16).to_sql(ty, out),
+            Type::INT4 => (self.0 as i32).to_sql(ty, out),
+            Type::INT8 => self.0.to_sql(ty, out),
+            // Numeric / decimal: fall through to text representation.
+            Type::FLOAT4 => (self.0 as f32).to_sql(ty, out),
+            Type::FLOAT8 => (self.0 as f64).to_sql(ty, out),
+            _ => Err(format!("PgInt: unsupported target type {:?}", ty).into()),
+        }
+    }
+
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        use postgres::types::Type;
+        matches!(
+            *ty,
+            Type::INT2 | Type::INT4 | Type::INT8 | Type::FLOAT4 | Type::FLOAT8
+        )
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+/// Postgres ToSql adapter for our SqlValue::Text. Accepts the obvious
+/// string column types and also parses ISO 8601 forms when the target
+/// column is DATE / TIME / TIMESTAMP, since the runtime always emits
+/// dates and times as Text values.
+#[derive(Debug)]
+struct PgText(String);
+
+impl postgres::types::ToSql for PgText {
+    fn to_sql(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        use postgres::types::Type;
+        match *ty {
+            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
+                self.0.to_sql(ty, out)
+            }
+            Type::DATE => {
+                let d = chrono::NaiveDate::parse_from_str(self.0.trim(), "%Y-%m-%d")
+                    .map_err(|e| format!("PgText DATE parse '{}': {e}", self.0))?;
+                d.to_sql(ty, out)
+            }
+            Type::TIME => {
+                let t = chrono::NaiveTime::parse_from_str(self.0.trim(), "%H:%M:%S")
+                    .or_else(|_| {
+                        chrono::NaiveTime::parse_from_str(self.0.trim(), "%H:%M:%S%.f")
+                    })
+                    .map_err(|e| format!("PgText TIME parse '{}': {e}", self.0))?;
+                t.to_sql(ty, out)
+            }
+            Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+                let s = self.0.trim();
+                let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+                    .map_err(|e| format!("PgText TIMESTAMP parse '{}': {e}", s))?;
+                dt.to_sql(ty, out)
+            }
+            _ => Err(format!("PgText: unsupported target type {:?}", ty).into()),
+        }
+    }
+
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        use postgres::types::Type;
+        matches!(
+            *ty,
+            Type::TEXT
+                | Type::VARCHAR
+                | Type::BPCHAR
+                | Type::NAME
+                | Type::UNKNOWN
+                | Type::DATE
+                | Type::TIME
+                | Type::TIMESTAMP
+                | Type::TIMESTAMPTZ
+        )
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+/// Same idea as PgInt but for f64, accepts FLOAT4/FLOAT8/NUMERIC.
+#[derive(Debug)]
+struct PgFloat(f64);
+
+impl postgres::types::ToSql for PgFloat {
+    fn to_sql(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        use postgres::types::Type;
+        match *ty {
+            Type::FLOAT4 => (self.0 as f32).to_sql(ty, out),
+            Type::FLOAT8 => self.0.to_sql(ty, out),
+            Type::INT2 => (self.0 as i16).to_sql(ty, out),
+            Type::INT4 => (self.0 as i32).to_sql(ty, out),
+            Type::INT8 => (self.0 as i64).to_sql(ty, out),
+            _ => Err(format!("PgFloat: unsupported target type {:?}", ty).into()),
+        }
+    }
+
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        use postgres::types::Type;
+        matches!(
+            *ty,
+            Type::FLOAT4 | Type::FLOAT8 | Type::INT2 | Type::INT4 | Type::INT8
+        )
+    }
+
+    postgres::types::to_sql_checked!();
 }
 
 fn bind_postgres(params: &[SqlValue]) -> Vec<Box<dyn postgres::types::ToSql + Sync>> {
@@ -684,12 +909,14 @@ fn bind_postgres(params: &[SqlValue]) -> Vec<Box<dyn postgres::types::ToSql + Sy
         .iter()
         .map(|v| -> Box<dyn postgres::types::ToSql + Sync> {
             match v {
-                SqlValue::Null => Box::new(Option::<i32>::None),
-                SqlValue::Bool(b) => Box::new(*b),
-                SqlValue::I32(i) => Box::new(*i),
-                SqlValue::I64(i) => Box::new(*i),
-                SqlValue::F64(f) => Box::new(*f),
-                SqlValue::Text(s) => Box::new(s.clone()),
+                SqlValue::Null => Box::new(PgNull),
+                // Convert Bool to int 0/1 so it matches SMALLINT/INTEGER
+                // columns (Postgres won't auto-coerce bool -> int).
+                SqlValue::Bool(b) => Box::new(PgInt(if *b { 1 } else { 0 })),
+                SqlValue::I32(i) => Box::new(PgInt(*i as i64)),
+                SqlValue::I64(i) => Box::new(PgInt(*i)),
+                SqlValue::F64(f) => Box::new(PgFloat(*f)),
+                SqlValue::Text(s) => Box::new(PgText(s.clone())),
                 SqlValue::Bytes(b) => Box::new(b.clone()),
             }
         })
@@ -796,14 +1023,7 @@ pub fn fetch_rows_text(sql: &str, limit: usize) -> Result<Vec<String>, i32> {
             let mut out = Vec::with_capacity(pg_rows.len().min(limit));
             for r in pg_rows.into_iter().take(limit) {
                 let cols = r.columns().len();
-                let parts: Vec<String> = (0..cols)
-                    .map(|i| {
-                        r.try_get::<_, Option<String>>(i)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default()
-                    })
-                    .collect();
+                let parts: Vec<String> = (0..cols).map(|i| pg_col_to_string(&r, i)).collect();
                 out.push(parts.join("|"));
             }
             Ok(out)

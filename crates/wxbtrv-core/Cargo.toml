@@ -10,9 +10,11 @@ name = "wxbtrv_core"
 [dependencies]
 odbc-api.workspace   = true
 rusqlite.workspace   = true
-postgres             = "0.19"
+postgres             = { version = "0.19", features = ["with-chrono-0_4"] }
 postgres-native-tls  = "0.5"
 native-tls           = "0.2"
+bytes                = "1"
+chrono               = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = "1"
