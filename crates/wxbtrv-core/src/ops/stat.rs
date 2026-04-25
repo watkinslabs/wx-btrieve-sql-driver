@@ -2,7 +2,7 @@
 
 use super::helpers::{posblk_key, strace};
 use crate::constants::*;
-use crate::sql::fetch_one_row;
+use crate::sql::fetch_with;
 use crate::state::state;
 use core::ffi::c_void;
 use core::ptr;
@@ -51,12 +51,13 @@ pub(super) fn op_stat(posblk: *mut c_void, data_buf: *mut c_void, data_len: *mut
     let page_size: u16 = meta.page_size;
     let file_flags: u16 = meta.file_flags;
 
-    // Record count: COUNT(*) for exact live row count (sys.partitions is stale after deletes)
+    // Record count: COUNT(*) for exact live row count.
     let rec_count: u32 = {
         let tref = meta.table_ref("", "");
         let sql = format!("SELECT COUNT(*) FROM {}", tref);
-        fetch_one_row(&sql, 1)
+        fetch_with(&sql, &[], 1, 1)
             .ok()
+            .and_then(|rows| rows.into_iter().next())
             .and_then(|row| row.into_iter().next())
             .and_then(|s| s.parse::<u64>().ok())
             .map(|n| n as u32)
@@ -217,7 +218,7 @@ pub(super) fn op_stat_extended(
                     .filter_map(|fnum| {
                         field_map
                             .get(fnum)
-                            .map(|f| format!("[{}]", f.name.replace(']', "]]")))
+                            .map(|f| crate::dialect::active().quote_ident(&f.name))
                     })
                     .collect();
                 let unique_count: u32 = if distinct_cols.is_empty() {
@@ -232,8 +233,9 @@ pub(super) fn op_stat_extended(
                             tref
                         )
                     };
-                    fetch_one_row(&sql, 1)
+                    fetch_with(&sql, &[], 1, 1)
                         .ok()
+                        .and_then(|rows| rows.into_iter().next())
                         .and_then(|row| row.into_iter().next())
                         .and_then(|s| s.trim().parse::<u64>().ok())
                         .map(|n| n as u32)
