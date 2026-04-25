@@ -123,24 +123,33 @@ pub(super) fn op_create(
             10 => "TIME".to_string(),
             _ => format!("VARBINARY({})", len.max(1)),
         };
-        col_sql.push(format!("[col_{:02}] {}", col_idx, sql_ty));
+        col_sql.push(format!(
+            "{} {}",
+            crate::dialect::active().quote_ident(&format!("col_{:02}", col_idx)),
+            sql_ty
+        ));
         col_idx += 1;
         off += 16;
         if (flags & 0x0010) == 0 {
             // end of a segmented key — continue scanning more keys
         }
     }
+    let dialect = crate::dialect::active();
     if col_sql.is_empty() {
-        col_sql.push("[col_00] VARCHAR(255)".to_string());
+        col_sql.push(format!(
+            "{} VARCHAR(255)",
+            dialect.quote_ident("col_00")
+        ));
     }
 
-    let create_sql = format!(
-        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = '{}') \
-         CREATE TABLE [{}] ([btrv_row] INT IDENTITY(1,1) PRIMARY KEY, {})",
-        table_name,
-        table_name,
+    let table_qualified = dialect.quote_ident(&table_name);
+    let cols_with_id = format!(
+        "{} {}, {}",
+        dialect.quote_ident("btrv_row"),
+        dialect.identity_column(),
         col_sql.join(", ")
     );
+    let create_sql = dialect.create_table_if_not_exists(&table_qualified, &cols_with_id);
     strace!("op_create sql={}", create_sql);
     match execute_sql(&create_sql) {
         Ok(_) => {

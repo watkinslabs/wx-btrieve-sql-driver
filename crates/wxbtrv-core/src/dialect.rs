@@ -27,10 +27,22 @@ pub trait Dialect {
     /// MSSQL: `[name]`, Postgres / SQLite: `"name"`.
     fn quote_ident(&self, name: &str) -> String;
 
-    /// Identity / autoincrement column declaration used in CREATE TABLE
-    /// for the recnum column. Caller appends `PRIMARY KEY` or whatever else
-    /// is needed.
+    /// Full column declaration for the recnum identity / autoincrement
+    /// column in a CREATE TABLE — includes `PRIMARY KEY` when the dialect
+    /// requires it inline (SQLite). Caller emits this verbatim after the
+    /// column name.
     fn identity_column(&self) -> &'static str;
+
+    /// `CREATE TABLE [IF NOT EXISTS] table_qualified (cols)` adapted to
+    /// the dialect. MSSQL has no native IF NOT EXISTS for CREATE TABLE,
+    /// so we wrap with an OBJECT_ID guard. Postgres / SQLite use the
+    /// native form.
+    fn create_table_if_not_exists(&self, table_qualified: &str, cols: &str) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            table_qualified, cols
+        )
+    }
 
     /// SQL fragment that returns the most recently inserted identity value
     /// on the current session. Always a single-column / single-row scalar.
@@ -80,7 +92,7 @@ impl Dialect for MssqlDialect {
         format!("[{}]", name.replace(']', "]]"))
     }
     fn identity_column(&self) -> &'static str {
-        "INT IDENTITY(1,1)"
+        "INT IDENTITY(1,1) PRIMARY KEY"
     }
     fn last_insert_id_sql(&self) -> &'static str {
         "SELECT CAST(SCOPE_IDENTITY() AS BIGINT)"
@@ -94,6 +106,16 @@ impl Dialect for MssqlDialect {
     fn drop_index_sql(&self, index_qualified: &str, table_qualified: &str) -> String {
         format!("DROP INDEX {} ON {}", index_qualified, table_qualified)
     }
+    fn create_table_if_not_exists(&self, table_qualified: &str, cols: &str) -> String {
+        // MSSQL: guard via OBJECT_ID — works with both schema-qualified and
+        // bare names; sys.tables alone wouldn't catch cross-schema cases.
+        format!(
+            "IF OBJECT_ID(N'{}', N'U') IS NULL CREATE TABLE {} ({})",
+            table_qualified.replace('\'', "''"),
+            table_qualified,
+            cols
+        )
+    }
 }
 
 impl Dialect for PostgresDialect {
@@ -104,7 +126,7 @@ impl Dialect for PostgresDialect {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
     fn identity_column(&self) -> &'static str {
-        "BIGINT GENERATED ALWAYS AS IDENTITY"
+        "BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
     }
     fn last_insert_id_sql(&self) -> &'static str {
         // Caller always pairs this with a preceding INSERT ... RETURNING
