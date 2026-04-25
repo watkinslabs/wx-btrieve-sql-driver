@@ -104,19 +104,25 @@ jobs:
           BTR_IMPORT_EXE: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/btr-import.exe
         run: cargo build --release --target i686-pc-windows-gnu -p installer
 
+      # Two shipped artifacts only:
+      #   wlbtr-installer-${TAG}-windows-i686.exe — drops wxbtrv.dll, wxbtrv.sys,
+      #     db_config.exe, btr-import.exe via embedded include_bytes!.
+      #   wlbtr-tools-${TAG}-linux-x86_64.tar.gz  — db-config + btr-import
+      #     standalone CLIs for managing wxbtrv.db on a Linux dev box.
       - name: Stage release artifacts
         run: |
           set -euo pipefail
-          mkdir -p dist
+          TAG="${{ steps.bump.outputs.tag }}"
           WIN=target/i686-pc-windows-gnu/release
           NAT=target/release
-          cp "$WIN/wxbtrv.dll"      dist/
-          cp "$WIN/wxbtrv.sys"      dist/
-          cp "$WIN/db_config.exe"   dist/
-          cp "$WIN/btr-import.exe"  dist/
-          cp "$WIN/installer.exe"   dist/
-          cp "$NAT/db_config"       dist/db-config-linux
-          cp "$NAT/btr-import"      dist/btr-import-linux
+          mkdir -p dist staging-linux
+
+          cp "$WIN/installer.exe" "dist/wlbtr-installer-${TAG}-windows-i686.exe"
+
+          cp "$NAT/db_config"   "staging-linux/db-config"
+          cp "$NAT/btr-import"  "staging-linux/btr-import"
+          tar -C staging-linux -czf "dist/wlbtr-tools-${TAG}-linux-x86_64.tar.gz" db-config btr-import
+
           (cd dist && sha256sum * > SHA256SUMS)
           ls -lh dist/
 
