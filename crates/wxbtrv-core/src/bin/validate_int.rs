@@ -6,10 +6,12 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ── Minimal type mirrors (must stay in sync with state.rs) ───────────────────
-
+// Layouts are kept identical to the runtime structs for parser compatibility,
+// even when the validator itself doesn't read every field.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct IntField {
     num: u32,
@@ -21,6 +23,7 @@ struct IntField {
     default_value: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 struct IntIndex {
     num: u32,
@@ -30,6 +33,7 @@ struct IntIndex {
     key_len: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct TableMeta {
     table_name: String,

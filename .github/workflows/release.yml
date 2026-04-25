@@ -86,13 +86,23 @@ jobs:
       - name: Build wxbtrv.sys (DOS driver)
         run: make sys
 
-      - name: Build Windows CLIs (db-config, btr-import, installer)
+      - name: Build Windows db-config + btr-import
         run: |
           cargo build --release --target i686-pc-windows-gnu \
-            -p db-config -p btr-import -p installer
+            -p db-config -p btr-import
 
       - name: Build native CLIs (Linux)
         run: cargo build --release -p db-config -p btr-import
+
+      # Installer must build LAST and with payload env vars set so its
+      # build.rs embeds the prebuilt DLL/sys/CLIs as include_bytes!.
+      - name: Build Windows installer (with bundled payloads)
+        env:
+          WXBTRV_DLL: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/wxbtrv.dll
+          WXBTRV_SYS: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/wxbtrv.sys
+          INT_TOOL_EXE: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/db_config.exe
+          BTR_IMPORT_EXE: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/btr-import.exe
+        run: cargo build --release --target i686-pc-windows-gnu -p installer
 
       - name: Stage release artifacts
         run: |

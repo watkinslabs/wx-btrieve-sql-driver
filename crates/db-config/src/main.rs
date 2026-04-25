@@ -1,10 +1,9 @@
 mod btrieve;
 mod commands;
 mod db;
-mod error;
 mod export;
 
-use btr_types::{IndexSegment, IntField, IntIndex};
+use btr_types::{IntField, IntIndex};
 use clap::{Parser, Subcommand};
 use odbc_api::Cursor;
 use std::path::PathBuf;

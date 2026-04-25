@@ -24,7 +24,9 @@ pub use exports_misc::*;
 #[allow(unused_imports)]
 pub use ops_exports::*;
 
+#[cfg(target_os = "windows")]
 use core::ffi::c_void;
+#[cfg(target_os = "windows")]
 use std::fs;
 
 #[cfg(target_os = "windows")]

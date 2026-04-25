@@ -3,24 +3,21 @@ use rusqlite::{params, Connection, Result};
 pub struct MigrationRow {
     pub table_name: String,
     pub source_dir: String,
-    pub record_length: u32,
     pub field_count: u32,
     pub migrated: bool,
     pub migrated_at: Option<String>,
     pub row_count: Option<i64>,
     pub target_db: String,
-    pub target_server: String,
 }
 
 pub fn migration_status(conn: &Connection) -> Result<Vec<MigrationRow>> {
     let mut stmt = conn.prepare(
-        "SELECT t.table_name, t.source_dir, t.record_length,
+        "SELECT t.table_name, t.source_dir,
                 (SELECT COUNT(*) FROM btr_fields WHERE table_id = t.id),
                 COALESCE(t.migrated, 0),
                 t.migrated_at,
                 t.row_count,
-                COALESCE(t.target_db, ''),
-                COALESCE(t.target_server, '')
+                COALESCE(t.target_db, '')
          FROM btr_tables t ORDER BY t.table_name, t.source_dir",
     )?;
     let rows = stmt
@@ -28,13 +25,11 @@ pub fn migration_status(conn: &Connection) -> Result<Vec<MigrationRow>> {
             Ok(MigrationRow {
                 table_name: r.get(0)?,
                 source_dir: r.get(1)?,
-                record_length: r.get::<_, i64>(2)? as u32,
-                field_count: r.get::<_, i64>(3)? as u32,
-                migrated: r.get::<_, i64>(4)? != 0,
-                migrated_at: r.get(5)?,
-                row_count: r.get(6)?,
-                target_db: r.get(7)?,
-                target_server: r.get(8)?,
+                field_count: r.get::<_, i64>(2)? as u32,
+                migrated: r.get::<_, i64>(3)? != 0,
+                migrated_at: r.get(4)?,
+                row_count: r.get(5)?,
+                target_db: r.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;

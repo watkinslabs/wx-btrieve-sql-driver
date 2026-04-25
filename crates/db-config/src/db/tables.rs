@@ -2,12 +2,10 @@ use btr_types::{IndexSegment, IntField, IntFile, IntIndex};
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
 pub struct TableRow {
-    pub id: i64,
     pub table_name: String,
     pub schema_name: String,
     pub db_name: String,
     pub source_dir: String,
-    pub source_path: String,
     pub record_length: u32,
     pub field_count: u32,
     pub index_count: u32,
@@ -122,8 +120,7 @@ fn insert_index(conn: &Connection, table_id: i64, idx: &IntIndex) -> Result<()> 
 
 pub fn list_tables(conn: &Connection) -> Result<Vec<TableRow>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.table_name, t.schema_name, t.db_name, t.source_dir, t.source_path,
-                t.record_length,
+        "SELECT t.table_name, t.schema_name, t.db_name, t.source_dir, t.record_length,
                 (SELECT COUNT(*) FROM btr_fields  WHERE table_id = t.id) AS fc,
                 (SELECT COUNT(*) FROM btr_indexes WHERE table_id = t.id) AS ic
          FROM btr_tables t ORDER BY t.table_name, t.source_dir",
@@ -131,15 +128,13 @@ pub fn list_tables(conn: &Connection) -> Result<Vec<TableRow>> {
     let rows = stmt
         .query_map([], |row| {
             Ok(TableRow {
-                id: row.get(0)?,
-                table_name: row.get(1)?,
-                schema_name: row.get(2)?,
-                db_name: row.get(3)?,
-                source_dir: row.get(4)?,
-                source_path: row.get(5)?,
-                record_length: row.get::<_, i64>(6)? as u32,
-                field_count: row.get::<_, i64>(7)? as u32,
-                index_count: row.get::<_, i64>(8)? as u32,
+                table_name: row.get(0)?,
+                schema_name: row.get(1)?,
+                db_name: row.get(2)?,
+                source_dir: row.get(3)?,
+                record_length: row.get::<_, i64>(4)? as u32,
+                field_count: row.get::<_, i64>(5)? as u32,
+                index_count: row.get::<_, i64>(6)? as u32,
             })
         })?
         .collect::<Result<Vec<_>>>()?;

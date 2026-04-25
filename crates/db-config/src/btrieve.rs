@@ -1,10 +1,11 @@
-/// btrieve.rs — record reading from .B files for int-tool (analyze-b, future data ops).
-///
-/// Schema extraction (FCR parsing, schema_to_int) is in btr_types::bfile and shared
-/// with btr-import.
-pub use btr_types::bfile::{
-    covered_bytes, parse_schema, schema_to_int, BtrieveKey, BtrieveSchema, BtrieveSeg, RecordKind,
-};
+//! btrieve.rs — record reading from .B files for db-config (analyze-b, future data ops).
+//!
+//! Schema extraction (FCR parsing, schema_to_int) is in btr_types::bfile and shared
+//! with btr-import. The record-walker (`read_records`, `pat_lookup`, etc.) is
+//! reserved for the not-yet-wired `analyze-b` command.
+#![allow(dead_code)]
+
+pub use btr_types::bfile::{parse_schema, schema_to_int, BtrieveSchema, RecordKind};
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
