@@ -5,7 +5,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use wxbtrv_core::ops::sql_helpers::{
-    build_continuation_where, build_key_where, build_order_by_cols, col_to_sql_literal,
+    build_continuation_where_marker, build_key_where, build_order_by_cols, col_to_sql_param,
     parse_filter_terms,
 };
 use wxbtrv_core::record::{pack_row, unpack_row};
@@ -123,16 +123,16 @@ fn bench_build_key_where(c: &mut Criterion) {
 
 fn bench_build_continuation_where(c: &mut Criterion) {
     let cols: Vec<(String, String, bool)> = vec![
-        ("[A]".into(), "'foo'".into(), false),
-        ("[B]".into(), "5".into(), false),
-        ("[C]".into(), "'bar'".into(), false),
+        ("[A]".into(), "?".into(), false),
+        ("[B]".into(), "?".into(), false),
+        ("[C]".into(), "?".into(), false),
     ];
     c.bench_function("build_continuation_where_3seg_fwd", |b| {
         b.iter(|| {
-            build_continuation_where(
+            build_continuation_where_marker(
                 black_box(&cols),
                 black_box(1),
-                black_box(987654),
+                black_box("?"),
                 black_box("[MDS_RECNUM]"),
             )
         })
@@ -159,19 +159,19 @@ fn bench_build_order_by_cols(c: &mut Criterion) {
     });
 }
 
-fn bench_col_to_sql_literal(c: &mut Criterion) {
+fn bench_col_to_sql_param(c: &mut Criterion) {
     let str_field = make_field(1, "NAME", 0, 32, 0);
     let int_field = make_field(2, "ID", 1, 4, 0);
     let dec_field = make_field(3, "BAL", 5, 8, 0);
-    let mut group = c.benchmark_group("col_to_sql_literal");
+    let mut group = c.benchmark_group("col_to_sql_param");
     group.bench_function("string_with_quotes", |b| {
-        b.iter(|| col_to_sql_literal(black_box(&str_field), black_box("o'brien & co  ")))
+        b.iter(|| col_to_sql_param(black_box(&str_field), black_box("o'brien & co  ")))
     });
     group.bench_function("int", |b| {
-        b.iter(|| col_to_sql_literal(black_box(&int_field), black_box(" 42 ")))
+        b.iter(|| col_to_sql_param(black_box(&int_field), black_box(" 42 ")))
     });
     group.bench_function("decimal", |b| {
-        b.iter(|| col_to_sql_literal(black_box(&dec_field), black_box("1234.56")))
+        b.iter(|| col_to_sql_param(black_box(&dec_field), black_box("1234.56")))
     });
     group.finish();
 }
@@ -219,7 +219,7 @@ criterion_group!(
     bench_build_key_where,
     bench_build_continuation_where,
     bench_build_order_by_cols,
-    bench_col_to_sql_literal,
+    bench_col_to_sql_param,
     bench_parse_filter_terms,
     bench_pack_row,
     bench_unpack_row,
