@@ -70,6 +70,7 @@ pub(super) fn op_create_index(
     }
 
     // Map byte-offsets to column names via meta.fields.
+    let dialect = crate::dialect::active();
     let mut cols: Vec<(String, bool)> = Vec::new();
     let mut field_nums: Vec<u32> = Vec::new();
     for (pos, len, is_desc) in &seg_fields {
@@ -80,7 +81,7 @@ pub(super) fn op_create_index(
             .find(|f| f.offset == off0 && (f.length == *len || *len == 0))
         {
             Some(f) => {
-                cols.push((format!("[{}]", f.name.replace(']', "]]")), *is_desc));
+                cols.push((dialect.quote_ident(&f.name), *is_desc));
                 field_nums.push(f.num);
             }
             None => {
@@ -113,8 +114,8 @@ pub(super) fn op_create_index(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "CREATE INDEX [{}] ON {} ({})",
-        ix_name,
+        "CREATE INDEX {} ON {} ({})",
+        dialect.quote_ident(&ix_name),
         meta.table_ref("", ""),
         col_list
     );
@@ -165,7 +166,8 @@ pub(super) fn op_drop_index(posblk: *mut c_void, key_num: i16) -> i32 {
         meta.table_name.replace(' ', "_").to_ascii_lowercase(),
         target_num
     );
-    let sql = format!("DROP INDEX [{}] ON {}", ix_name, meta.table_ref("", ""));
+    let dialect = crate::dialect::active();
+    let sql = dialect.drop_index_sql(&dialect.quote_ident(&ix_name), &meta.table_ref("", ""));
     strace!("op_drop_index h={} kn={} sql={}", hid, key_num, sql);
     if let Err(e) = execute_sql(&sql) {
         strace!("op_drop_index h={} sql err={} (ignored)", hid, e);

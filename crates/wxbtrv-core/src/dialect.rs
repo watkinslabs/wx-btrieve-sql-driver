@@ -43,6 +43,14 @@ pub trait Dialect {
     /// MSSQL & SQLite use `?`; Postgres uses `$N`.
     fn param_marker(&self, idx: usize) -> String;
 
+    /// Render `DROP INDEX <name> [ON <table>]`. MSSQL requires the
+    /// `ON table` clause; Postgres and SQLite reject it.
+    fn drop_index_sql(&self, index_qualified: &str, table_qualified: &str) -> String {
+        // Default — no `ON table`. MSSQL overrides.
+        let _ = table_qualified;
+        format!("DROP INDEX {}", index_qualified)
+    }
+
     /// Backend-flavored `BEGIN TRANSACTION`. Used by op 19 (Begin Transaction).
     fn begin_txn(&self) -> &'static str {
         "BEGIN TRANSACTION"
@@ -82,6 +90,9 @@ impl Dialect for MssqlDialect {
     }
     fn param_marker(&self, _idx: usize) -> String {
         "?".to_string()
+    }
+    fn drop_index_sql(&self, index_qualified: &str, table_qualified: &str) -> String {
+        format!("DROP INDEX {} ON {}", index_qualified, table_qualified)
     }
 }
 
