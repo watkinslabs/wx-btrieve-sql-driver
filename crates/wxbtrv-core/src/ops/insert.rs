@@ -2,17 +2,32 @@
 
 use super::helpers::{clone_table_meta, posblk_key, strace};
 use crate::constants::*;
-use crate::record::unpack_row;
-use crate::sql::{execute_sql, fetch_one_row};
+use crate::record::unpack_row_typed;
+use crate::sql::{execute_with, fetch_with};
+use crate::sql_param::SqlValue;
 use crate::state::state;
 use core::ffi::c_void;
 use core::ptr;
 use core::slice;
 
+/// Build the per-backend "SELECT last-insert-id" used after an INSERT, and
+/// fetch the assigned identity. Centralizes the dialect dispatch so both
+/// op_insert and insert_one share it.
+fn last_insert_id() -> i64 {
+    let sql = crate::dialect::active().last_insert_id_sql();
+    fetch_with(sql, &[], 1, 1)
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .and_then(|r| r.into_iter().next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Insert a single record worth of packed bytes. Factored out of op_insert
 /// so op_insert_extended can call it repeatedly.
 fn insert_one(hid: u32, meta: &crate::state::TableMeta, record: &[u8]) -> Result<i64, i32> {
-    let cols = unpack_row(&meta.fields, record);
+    let dialect = crate::dialect::active();
+    let cols = unpack_row_typed(&meta.fields, record);
     let is_sql_identity_col = meta.recnum_col != "MDS_RECNUM";
     let autoinc_field = meta.fields.iter().enumerate().find(|(_, f)| {
         f.native_type == 14
@@ -20,11 +35,11 @@ fn insert_one(hid: u32, meta: &crate::state::TableMeta, record: &[u8]) -> Result
             || (is_sql_identity_col && f.name.eq_ignore_ascii_case(&meta.recnum_col))
     });
     let autoinc_idx = autoinc_field.map(|(i, _)| i);
-    let insert_cols: Vec<_> = cols
-        .iter()
+    let insert_cols: Vec<(String, SqlValue)> = cols
+        .into_iter()
         .enumerate()
         .filter(|(i, _)| !autoinc_idx.map(|ai| *i == ai).unwrap_or(false))
-        .map(|(_, cv)| cv.clone())
+        .map(|(_, cv)| cv)
         .collect();
     if insert_cols.is_empty() {
         return Err(BTR_DATA_TOO_SHORT);
@@ -32,22 +47,21 @@ fn insert_one(hid: u32, meta: &crate::state::TableMeta, record: &[u8]) -> Result
     let tref = meta.table_ref("", "");
     let col_names: String = insert_cols
         .iter()
-        .map(|(n, _)| format!("[{}]", n.replace(']', "]]")))
+        .map(|(n, _)| dialect.quote_ident(n))
         .collect::<Vec<_>>()
         .join(", ");
-    let col_vals: String = insert_cols
-        .iter()
-        .map(|(_, v)| v.clone())
+    let placeholders: String = (1..=insert_cols.len())
+        .map(|i| dialect.param_marker(i))
         .collect::<Vec<_>>()
         .join(", ");
-    let insert_sql = format!("INSERT INTO {} ({}) VALUES ({})", tref, col_names, col_vals);
+    let params: Vec<SqlValue> = insert_cols.into_iter().map(|(_, v)| v).collect();
+    let insert_sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        tref, col_names, placeholders
+    );
     strace!("insert_one h={} sql={}", hid, insert_sql);
-    execute_sql(&insert_sql).map_err(|_| BTR_DUPLICATE_KEY)?;
-    let new_id: i64 = fetch_one_row("SELECT CAST(SCOPE_IDENTITY() AS BIGINT)", 1)
-        .ok()
-        .and_then(|r| r.into_iter().next())
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
+    execute_with(&insert_sql, &params).map_err(|_| BTR_DUPLICATE_KEY)?;
+    let new_id = last_insert_id();
     if let Ok(mut st) = state().lock() {
         if let Some(h) = st.handles.get_mut(&hid) {
             h.last_recnum = Some(new_id);
@@ -96,90 +110,42 @@ pub(super) fn op_insert(posblk: *mut c_void, data_buf: *const c_void, data_len: 
     }
     let record = unsafe { slice::from_raw_parts(data_buf as *const u8, dlen) };
 
-    let cols = unpack_row(&meta.fields, record);
-
-    // Find the AUTOINCREMENT field.
+    // Locate the AUTOINCREMENT field's record-buffer offset/length so we
+    // can write the assigned ID back to the caller's buffer after insert.
     let is_sql_identity_col = meta.recnum_col != "MDS_RECNUM";
-    let autoinc_field = meta.fields.iter().enumerate().find(|(_, f)| {
-        f.native_type == 14
+    let autoinc_meta = meta.fields.iter().find(|f| {
+        let is_autoinc = f.native_type == 14
             || f.native_type == 15
-            || (is_sql_identity_col && f.name.eq_ignore_ascii_case(&meta.recnum_col))
-    });
-    let (autoinc_idx, autoinc_offset, autoinc_len) = if let Some((i, f)) = autoinc_field {
+            || (is_sql_identity_col && f.name.eq_ignore_ascii_case(&meta.recnum_col));
+        if !is_autoinc {
+            return false;
+        }
         let start = f.offset as usize;
         let end = (f.offset + f.length) as usize;
-        let should_skip = is_sql_identity_col && f.name.eq_ignore_ascii_case(&meta.recnum_col)
+        is_sql_identity_col && f.name.eq_ignore_ascii_case(&meta.recnum_col)
             || record
                 .get(start..end)
                 .map(|s| s.iter().all(|&b| b == 0))
-                .unwrap_or(true);
-        if should_skip {
-            (Some(i), f.offset, f.length)
-        } else {
-            (None, 0, 0)
-        }
-    } else {
-        (None, 0, 0)
+                .unwrap_or(true)
+    });
+
+    let new_id = match insert_one(hid, &meta, record) {
+        Ok(id) => id,
+        Err(e) => return e,
     };
 
-    let insert_cols: Vec<_> = cols
-        .iter()
-        .zip(meta.fields.iter())
-        .enumerate()
-        .filter(|(i, _)| !autoinc_idx.map(|ai| *i == ai).unwrap_or(false))
-        .map(|(_, (cv, _))| cv.clone())
-        .collect();
-
-    if insert_cols.is_empty() {
-        return BTR_DATA_TOO_SHORT;
-    }
-    let tref = meta.table_ref("", "");
-    let col_names: String = insert_cols
-        .iter()
-        .map(|(n, _)| format!("[{}]", n.replace(']', "]]")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let col_vals: String = insert_cols
-        .iter()
-        .map(|(_, v)| v.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let insert_sql = format!("INSERT INTO {} ({}) VALUES ({})", tref, col_names, col_vals);
-
-    if autoinc_idx.is_some() {
-        strace!("op_insert(autoinc) h={} sql={}", hid, insert_sql);
-    } else {
-        strace!("op_insert h={} sql={}", hid, insert_sql);
-    }
-    if execute_sql(&insert_sql).is_err() {
-        return BTR_DUPLICATE_KEY;
-    }
-    let new_id: i64 = fetch_one_row("SELECT CAST(SCOPE_IDENTITY() AS BIGINT)", 1)
-        .ok()
-        .and_then(|r| r.into_iter().next())
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    {
-        if autoinc_idx.is_some()
-            && !data_buf.is_null()
-            && dlen >= (autoinc_offset + autoinc_len) as usize
-        {
+    if let Some(f) = autoinc_meta {
+        let need = (f.offset + f.length) as usize;
+        if !data_buf.is_null() && dlen >= need {
             let id_bytes = new_id.to_le_bytes();
-            let n = (autoinc_len as usize).min(8);
+            let n = (f.length as usize).min(8);
             unsafe {
-                let dst = (data_buf as *mut u8).add(autoinc_offset as usize);
+                let dst = (data_buf as *mut u8).add(f.offset as usize);
                 ptr::copy_nonoverlapping(id_bytes.as_ptr(), dst, n);
             }
         }
-        if let Ok(mut st) = state().lock() {
-            if let Some(h) = st.handles.get_mut(&hid) {
-                h.last_recnum = Some(new_id);
-                h.step_last_recnum = Some(new_id);
-            }
-        }
-        BTR_SUCCESS
     }
+    BTR_SUCCESS
 }
 
 /// **Op 40 — Insert Extended** (`B_INSERT_EXTENDED`)

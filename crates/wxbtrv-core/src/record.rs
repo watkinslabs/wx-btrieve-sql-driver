@@ -383,6 +383,141 @@ pub fn unpack_row(fields: &[IntField], record: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Typed counterpart to [`unpack_row`]. Returns `(field_name, SqlValue)`
+/// pairs ready for binding via the parameterized SQL pipeline.
+///
+/// Type mapping:
+///   STRING / ZSTRING / unknown  → SqlValue::Text (trim trailing spaces)
+///   INT / AUTOINC                → SqlValue::I64
+///   FLOAT                        → SqlValue::F64 (with default_value fallback
+///                                  for all-zero / non-finite values)
+///   MONEY                        → SqlValue::F64 (units / 10000)
+///   LOGICAL                      → SqlValue::Bool
+///   DATE                         → SqlValue::Text "YYYY-MM-DD" or default/NULL
+///   TIME                         → SqlValue::Text "HH:MM:SS"
+///   DECIMAL                      → SqlValue::I64 (TODO: full BCD decode)
+pub fn unpack_row_typed(fields: &[IntField], record: &[u8]) -> Vec<(String, crate::sql_param::SqlValue)> {
+    use crate::sql_param::SqlValue;
+    fields
+        .iter()
+        .map(|f| {
+            let slice = field_slice(record, f.offset, f.length, &f.name);
+            let v: SqlValue = match f.native_type {
+                TYPE_STRING => {
+                    let s: String = slice
+                        .iter()
+                        .map(|&b| b as char)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string();
+                    SqlValue::Text(s)
+                }
+                TYPE_ZSTRING => {
+                    let end_z = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+                    let s = String::from_utf8_lossy(&slice[..end_z])
+                        .trim_end()
+                        .to_string();
+                    SqlValue::Text(s)
+                }
+                TYPE_INT | TYPE_AUTOINC => {
+                    let mut le = [0u8; 8];
+                    let n = slice.len().min(8);
+                    le[..n].copy_from_slice(&slice[..n]);
+                    let v = match n {
+                        1 => le[0] as i64,
+                        2 => i16::from_le_bytes([le[0], le[1]]) as i64,
+                        4 => i32::from_le_bytes([le[0], le[1], le[2], le[3]]) as i64,
+                        8 => i64::from_le_bytes(le),
+                        _ => 0,
+                    };
+                    SqlValue::I64(v)
+                }
+                TYPE_FLOAT => {
+                    let default = f
+                        .default_value
+                        .as_deref()
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    if slice.is_empty() || slice.iter().all(|&b| b == 0) {
+                        SqlValue::F64(default)
+                    } else {
+                        let v = match slice.len() {
+                            4 => try_le_array::<4>(slice, "TYPE_FLOAT f32")
+                                .map(|buf| f32::from_le_bytes(buf) as f64),
+                            8 => try_le_array::<8>(slice, "TYPE_FLOAT f64")
+                                .map(f64::from_le_bytes),
+                            _ => None,
+                        };
+                        SqlValue::F64(
+                            v.filter(|v| v.is_finite() && !v.is_subnormal())
+                                .unwrap_or(default),
+                        )
+                    }
+                }
+                TYPE_MONEY => {
+                    let mut le = [0u8; 8];
+                    let n = slice.len().min(8);
+                    le[..n].copy_from_slice(&slice[..n]);
+                    let units = i64::from_le_bytes(le);
+                    SqlValue::F64(units as f64 / 10000.0)
+                }
+                TYPE_LOGICAL => SqlValue::Bool(slice.first().copied().unwrap_or(0) != 0),
+                TYPE_DATE => {
+                    if slice.len() >= 4 && slice.iter().any(|&b| b != 0) {
+                        let day = slice[0] as u16;
+                        let month = slice[1] as u16;
+                        let year = slice[2] as u16 | ((slice[3] as u16) << 8);
+                        if year > 0 && (1..=12).contains(&month) && (1..=31).contains(&day) {
+                            SqlValue::Text(format!("{:04}-{:02}-{:02}", year, month, day))
+                        } else {
+                            f.default_value
+                                .as_deref()
+                                .map(|d| SqlValue::Text(d.to_string()))
+                                .unwrap_or(SqlValue::Null)
+                        }
+                    } else {
+                        f.default_value
+                            .as_deref()
+                            .map(|d| SqlValue::Text(d.to_string()))
+                            .unwrap_or(SqlValue::Null)
+                    }
+                }
+                TYPE_TIME => {
+                    let buf = try_le_array::<4>(slice, "TYPE_TIME u32").unwrap_or([0; 4]);
+                    let t = u32::from_le_bytes(buf);
+                    let hh = (t / 1_000_000) % 100;
+                    let mm = (t / 10_000) % 100;
+                    let ss = (t / 100) % 100;
+                    SqlValue::Text(format!("{:02}:{:02}:{:02}", hh, mm, ss))
+                }
+                TYPE_DECIMAL => {
+                    let mut le = [0u8; 8];
+                    let n = slice.len().min(8);
+                    le[..n].copy_from_slice(&slice[..n]);
+                    SqlValue::I64(i64::from_le_bytes(le))
+                }
+                _ => {
+                    if slice.iter().all(|&b| b == 0) {
+                        f.default_value
+                            .as_deref()
+                            .map(|d| SqlValue::Text(d.to_string()))
+                            .unwrap_or(SqlValue::Null)
+                    } else {
+                        let s: String = slice
+                            .iter()
+                            .map(|&b| b as char)
+                            .collect::<String>()
+                            .trim_end()
+                            .to_string();
+                        SqlValue::Text(s)
+                    }
+                }
+            };
+            (f.name.clone(), v)
+        })
+        .collect()
+}
+
 /// Extract the WHERE-clause key value(s) from a key_buffer, given the relevant index.
 /// Returns Vec of (field_name, sql_value_string) pairs.
 /// Returns `None` for a segment when its raw bytes are all zero — IGNORE_NULL_VALUES
