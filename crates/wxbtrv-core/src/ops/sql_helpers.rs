@@ -372,6 +372,11 @@ pub fn build_continuation_where_marker(
 
 /// SELECT for Step ops: uses recnum_col for physical ordering.
 /// dir=1 → forward (ASC, >), dir=-1 → backward (DESC, <).
+///
+/// Deprecated path. Use [`build_step_select_n_params`] for the
+/// parameterized pipeline. Kept until all callers migrate; a final
+/// sweep at the end of 2b removes it along with the other legacy helpers.
+#[allow(dead_code)]
 pub(super) fn build_step_select_n(
     meta: &TableMeta,
     last_recnum: Option<i64>,
@@ -391,6 +396,43 @@ pub(super) fn build_step_select_n(
             "SELECT TOP {n} {cols} FROM {tref} WHERE {rc} {cmp} {rn} ORDER BY {rc} {ord_dir}",
         ),
         None => format!("SELECT TOP {n} {cols} FROM {tref} ORDER BY {rc} {ord_dir}",),
+    }
+}
+
+/// Parameterized variant of [`build_step_select_n`]. Returns
+/// `(sql, params)` ready to pass to `fetch_with`. Uses the active
+/// dialect's TOP/LIMIT shape.
+pub(super) fn build_step_select_n_params(
+    meta: &TableMeta,
+    last_recnum: Option<i64>,
+    dir: i8,
+    n: usize,
+) -> (String, Vec<SqlValue>) {
+    let dialect = crate::dialect::active();
+    let rc = meta.recnum_sql_ref();
+    let cols = meta.select_with_recnum();
+    let tref = meta.table_ref("", "");
+    let (ord_dir, cmp) = if dir >= 0 {
+        ("ASC", ">")
+    } else {
+        ("DESC", "<")
+    };
+    let order_by = format!("{rc} {ord_dir}");
+    match last_recnum {
+        Some(rn) => {
+            let where_clause =
+                format!("{rc} {cmp} {}", dialect.param_marker(1));
+            let sql = crate::dialect::select_with_limit(
+                dialect, n as u32, &cols, &tref, &where_clause, &order_by,
+            );
+            (sql, vec![SqlValue::I64(rn)])
+        }
+        None => {
+            let sql = crate::dialect::select_with_limit(
+                dialect, n as u32, &cols, &tref, "", &order_by,
+            );
+            (sql, vec![])
+        }
     }
 }
 

@@ -2,10 +2,10 @@
 //! Physical-order navigation based on recnum_col.
 
 use super::helpers::{posblk_key, strace, write_data};
-use super::sql_helpers::build_step_select_n;
+use super::sql_helpers::build_step_select_n_params;
 use super::sql_helpers::STEP_CHUNK_SIZE;
 use crate::constants::*;
-use crate::sql::fetch_rows_positional;
+use crate::sql::fetch_with;
 use crate::state::state;
 use core::ffi::c_void;
 
@@ -47,7 +47,7 @@ pub(super) fn step_cached(hid: u32, data_buf: *mut c_void, data_len: *mut u32, d
     };
 
     let n = if meta.local_cache { STEP_CHUNK_SIZE } else { 1 };
-    let sql = build_step_select_n(&meta, last_rn, dir, n);
+    let (sql, params) = build_step_select_n_params(&meta, last_rn, dir, n);
     strace!(
         "step_cached h={} dir={} last_rn={:?} chunk={} sql={}",
         hid,
@@ -56,7 +56,7 @@ pub(super) fn step_cached(hid: u32, data_buf: *mut c_void, data_len: *mut u32, d
         n,
         sql
     );
-    let rows = fetch_rows_positional(&sql, meta.fields.len() + 1, n);
+    let rows = fetch_with(&sql, &params, meta.fields.len() + 1, n);
     match rows {
         Err(e) => {
             if e == 4 {
