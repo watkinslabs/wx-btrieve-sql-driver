@@ -97,12 +97,14 @@ fn project(packed: &[u8], extracts: &[(u16, u16)]) -> Vec<u8> {
 
 /// Fetch the next record in index order for a given handle (direction dir=1/-1).
 /// Mirrors the SQL in op_get_next / op_get_prev but returns the tuple inline.
-/// `extra_where` is an optional extra WHERE predicate (the filter fragment).
+/// `filter_terms` is the optional filter clause (parsed from the descriptor)
+/// — when present, its placeholders are appended after the keyset
+/// continuation params so each backend's `?` / `$N` numbering stays correct.
 fn fetch_one_extended(
     hid: u32,
     meta: &TableMeta,
     dir: i8,
-    extra_where: Option<&str>,
+    filter_terms: Option<&[TermClause]>,
 ) -> Result<(i64, Vec<u8>, Vec<String>, u32), i32> {
     let (idx_num, last_keys, last_desc, last_rn) = {
         let Ok(st) = state().lock() else {
@@ -149,10 +151,15 @@ fn fetch_one_extended(
     } else {
         None
     };
-    let combined = match (base_where, extra_where) {
+    // Append filter-term params (keyed off params.len() so markers
+    // continue correctly past any keyset markers above).
+    let filter_where = filter_terms
+        .filter(|t| !t.is_empty())
+        .map(|t| build_filter_where(t, &mut params));
+    let combined = match (base_where, filter_where) {
         (Some(b), Some(f)) => format!("({}) AND ({})", b, f),
         (Some(b), None) => b,
-        (None, Some(f)) => f.to_string(),
+        (None, Some(f)) => f,
         (None, None) => String::new(),
     };
     let sql = select_with_limit(dialect, 1, &cols, &tref, &combined, &order_by);
@@ -207,12 +214,15 @@ fn run_extended(
         desc.field_extracts.len()
     );
 
-    let filter_where = if desc.terms.is_empty() {
+    let filter_terms: Option<&[TermClause]> = if desc.terms.is_empty() {
         None
     } else {
-        let w = build_filter_where(&desc.terms);
+        // Render-once for trace logging (params discarded — the real
+        // params are bound per-call inside fetch_one_extended).
+        let mut trace_params = Vec::new();
+        let w = build_filter_where(&desc.terms, &mut trace_params);
         strace!("{} h={} filter_where={}", op_label, hid, w);
-        Some(w)
+        Some(&desc.terms)
     };
 
     let max_recs = if desc.max_recs == 0 {
@@ -228,7 +238,7 @@ fn run_extended(
     let post_hdr = 2usize;
 
     while records.len() < max_recs {
-        match fetch_one_extended(hid, &meta, dir, filter_where.as_deref()) {
+        match fetch_one_extended(hid, &meta, dir, filter_terms) {
             Ok((rn, packed, fields, idx_num)) => {
                 let proj = project(&packed, &desc.field_extracts);
                 // Check output capacity budget.
@@ -266,7 +276,7 @@ fn run_extended(
     if records.is_empty() {
         // Status 64 = filter rejected all records in the remainder of the file.
         // Status 9 = plain EOF. We distinguish by whether a filter was active.
-        return if filter_where.is_some() { 64 } else { BTR_EOF };
+        return if filter_terms.is_some() { 64 } else { BTR_EOF };
     }
 
     // Write POST_BUFFER_HEADER + records into data_buf.

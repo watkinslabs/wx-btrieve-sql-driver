@@ -86,7 +86,7 @@ fn fetch_step_batch(
     last_rn: Option<i64>,
     dir: i8,
     n: usize,
-    extra_where: Option<&str>,
+    filter_terms: Option<&[TermClause]>,
 ) -> Result<Vec<(i64, Vec<u8>)>, i32> {
     let dialect = crate::dialect::active();
     let rc = meta.recnum_sql_ref();
@@ -102,14 +102,15 @@ fn fetch_step_batch(
         params.push(SqlValue::I64(rn));
         format!("{} {} {}", rc, cmp, dialect.param_marker(params.len()))
     });
-    // extra_where is built by build_filter_where with embedded literals;
-    // its values are not yet parameterized — that migration lives in a
-    // future TermClause/build_filter_where rewrite. Until then it composes
-    // verbatim into the WHERE.
-    let combined = match (base_where, extra_where) {
+    // Filter terms numbering off params.len() so $N markers stay correct
+    // after the keyset continuation marker.
+    let filter_where = filter_terms
+        .filter(|t| !t.is_empty())
+        .map(|t| build_filter_where(t, &mut params));
+    let combined = match (base_where, filter_where) {
         (Some(b), Some(f)) => format!("({}) AND ({})", b, f),
         (Some(b), None) => b,
-        (None, Some(f)) => f.to_string(),
+        (None, Some(f)) => f,
         (None, None) => String::new(),
     };
     let order_by = format!("{rc} {ord_dir}");
@@ -174,12 +175,13 @@ fn run_step_extended(
         desc.field_extracts.len()
     );
 
-    let filter_where = if desc.terms.is_empty() {
+    let filter_terms: Option<&[TermClause]> = if desc.terms.is_empty() {
         None
     } else {
-        let w = build_filter_where(&desc.terms);
+        let mut trace_params = Vec::new();
+        let w = build_filter_where(&desc.terms, &mut trace_params);
         strace!("{} h={} filter_where={}", op_label, hid, w);
-        Some(w)
+        Some(&desc.terms)
     };
 
     let max_recs = if desc.max_recs == 0 {
@@ -187,7 +189,7 @@ fn run_step_extended(
     } else {
         (desc.max_recs as usize).min(1024)
     };
-    let batch = match fetch_step_batch(&meta, last_rn, dir, max_recs, filter_where.as_deref()) {
+    let batch = match fetch_step_batch(&meta, last_rn, dir, max_recs, filter_terms) {
         Ok(b) => b,
         Err(4) => return BTR_EOF,
         Err(e) => {

@@ -442,12 +442,14 @@ pub(super) fn build_step_select_n_params(
 /// One filter term parsed out of a Get/Step Next/Prev Extended descriptor.
 #[derive(Debug, Clone)]
 pub struct TermClause {
-    /// Bracketed SQL column reference e.g. "[GLACCT]".
+    /// Dialect-quoted SQL column reference (e.g. `[GLACCT]` for MSSQL or
+    /// `"GLACCT"` for Postgres / SQLite).
     pub col_ref: String,
     /// SQL comparison operator ("=", ">", ">=", "<", "<=", "<>").
     pub cmp: &'static str,
-    /// SQL literal for the right-hand side (escaped / quoted as needed).
-    pub literal: String,
+    /// Typed right-hand-side value, bound as a SqlValue parameter when the
+    /// WHERE fragment is rendered.
+    pub value: SqlValue,
     /// Connector to the next term: '&' for AND, '|' for OR, '.' for last term.
     pub connector: char,
 }
@@ -481,12 +483,13 @@ fn field_at_offset(meta: &TableMeta, offset: u16) -> Option<&IntField> {
         .find(|f| offset as u32 >= f.offset && (offset as u32) < f.offset + f.length)
 }
 
-/// Decode `value_bytes` into a SQL literal using `field`'s type encoding.
-/// Mirrors record::unpack_key_fields() but operates on a single raw slice.
-pub(super) fn decode_term_literal(field: &IntField, bytes: &[u8]) -> String {
-    // Build a padded slice of the field's length so unpack_key_fields-style
-    // decoders work. We reuse record::unpack_row by constructing a synthetic
-    // one-field record, which guarantees identical encoding semantics.
+/// Decode `value_bytes` into a typed `SqlValue` using `field`'s type
+/// encoding. Mirrors record::unpack_key_fields() but operates on a single
+/// raw slice.
+pub(super) fn decode_term_value(field: &IntField, bytes: &[u8]) -> SqlValue {
+    // Reuse the typed record decoder by constructing a synthetic one-field
+    // record padded to the field's length — same encoding semantics as
+    // a real record column.
     let mut record = vec![0u8; field.length as usize];
     let n = bytes.len().min(record.len());
     record[..n].copy_from_slice(&bytes[..n]);
@@ -499,11 +502,11 @@ pub(super) fn decode_term_literal(field: &IntField, bytes: &[u8]) -> String {
         field_index: field.field_index,
         default_value: field.default_value.clone(),
     }];
-    let out = crate::record::unpack_row(&synth, &record);
-    out.into_iter()
+    crate::record::unpack_row_typed(&synth, &record)
+        .into_iter()
         .next()
-        .map(|(_, lit)| lit)
-        .unwrap_or_else(|| "NULL".to_string())
+        .map(|(_, v)| v)
+        .unwrap_or(SqlValue::Null)
 }
 
 /// Parse filter terms from a GNE / SNE descriptor. `desc` is the full input
@@ -541,8 +544,8 @@ pub fn parse_filter_terms(
         // If the term's fieldLen is shorter than the whole field, we treat
         // it as the leading prefix of that field (standard Btrieve semantics
         // for comparing fixed-length strings/ints with truncated values).
-        let literal = decode_term_literal(field, value_bytes);
-        let col_ref = format!("[{}]", field.name.replace(']', "]]"));
+        let value = decode_term_value(field, value_bytes);
+        let col_ref = crate::dialect::active().quote_ident(&field.name);
         // Connector: 1=AND, 2=OR, 0=end. For the last term (i == n_terms-1)
         // always emit '.' regardless, so the caller stops the chain.
         let connector = if i + 1 == n_terms {
@@ -557,7 +560,7 @@ pub fn parse_filter_terms(
         terms.push(TermClause {
             col_ref,
             cmp,
-            literal,
+            value,
             connector,
         });
         off = value_start + field_len;
@@ -569,13 +572,21 @@ pub fn parse_filter_terms(
 /// Groups consecutive AND-connected terms into parenthesized chunks so that
 /// OR connectors bind with correct precedence (AND tighter than OR, matching
 /// SQL and Btrieve spec).
-pub(super) fn build_filter_where(terms: &[TermClause]) -> String {
+/// Render the parsed filter terms as a SQL WHERE fragment, appending each
+/// term's typed value to `params`. Placeholder markers are numbered off
+/// `params.len()` so the fragment composes correctly with any keyset
+/// continuation params the caller has already pushed (Postgres uses `$N`
+/// where N is the absolute position in the final argument list).
+pub(super) fn build_filter_where(terms: &[TermClause], params: &mut Vec<SqlValue>) -> String {
     if terms.is_empty() {
         return "1=1".to_string();
     }
+    let dialect = crate::dialect::active();
     let mut or_groups: Vec<Vec<String>> = vec![Vec::new()];
     for t in terms {
-        let clause = format!("{} {} {}", t.col_ref, t.cmp, t.literal);
+        params.push(t.value.clone());
+        let marker = dialect.param_marker(params.len());
+        let clause = format!("{} {} {}", t.col_ref, t.cmp, marker);
         or_groups.last_mut().unwrap().push(clause);
         // '&' or '.' stays in the same AND group; '|' starts a new OR.
         if t.connector == '|' {
@@ -656,7 +667,7 @@ mod filter_tests {
         assert_eq!(terms.len(), 1);
         assert_eq!(terms[0].col_ref, "[NAME]");
         assert_eq!(terms[0].cmp, "=");
-        assert_eq!(terms[0].literal, "'ALPHA'");
+        assert_eq!(terms[0].value, SqlValue::Text("ALPHA".into()));
     }
 
     #[test]
@@ -673,39 +684,50 @@ mod filter_tests {
         let (terms, _) = parse_filter_terms(&meta, &buf, 8, 1).unwrap();
         assert_eq!(terms[0].col_ref, "[ID]");
         assert_eq!(terms[0].cmp, ">");
-        assert_eq!(terms[0].literal, "42");
+        assert_eq!(terms[0].value, SqlValue::I64(42));
     }
 
     #[test]
     fn build_where_and_or_precedence() {
-        let t = |col: &str, cmp: &'static str, lit: &str, c: char| TermClause {
+        let t = |col: &str, cmp: &'static str, val: SqlValue, c: char| TermClause {
             col_ref: col.into(),
             cmp,
-            literal: lit.into(),
+            value: val,
             connector: c,
         };
         // a=1 AND b=2 OR c=3 → (a=1 AND b=2) OR c=3
         let terms = vec![
-            t("[A]", "=", "1", '&'),
-            t("[B]", "=", "2", '|'),
-            t("[C]", "=", "3", '.'),
+            t("[A]", "=", SqlValue::I64(1), '&'),
+            t("[B]", "=", SqlValue::I64(2), '|'),
+            t("[C]", "=", SqlValue::I64(3), '.'),
         ];
+        let mut params = Vec::new();
+        // MSSQL dialect (positional `?`) is the workspace default.
         assert_eq!(
-            build_filter_where(&terms),
-            "([A] = 1 AND [B] = 2) OR [C] = 3"
+            build_filter_where(&terms, &mut params),
+            "([A] = ? AND [B] = ?) OR [C] = ?"
+        );
+        assert_eq!(
+            params,
+            vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]
         );
     }
 
     #[test]
     fn build_where_all_or() {
-        let t = |col: &str, lit: &str, c: char| TermClause {
+        let t = |col: &str, val: SqlValue, c: char| TermClause {
             col_ref: col.into(),
             cmp: "=",
-            literal: lit.into(),
+            value: val,
             connector: c,
         };
-        let terms = vec![t("[A]", "1", '|'), t("[B]", "2", '.')];
-        assert_eq!(build_filter_where(&terms), "[A] = 1 OR [B] = 2");
+        let terms = vec![t("[A]", SqlValue::I64(1), '|'), t("[B]", SqlValue::I64(2), '.')];
+        let mut params = Vec::new();
+        assert_eq!(
+            build_filter_where(&terms, &mut params),
+            "[A] = ? OR [B] = ?"
+        );
+        assert_eq!(params, vec![SqlValue::I64(1), SqlValue::I64(2)]);
     }
 }
 
