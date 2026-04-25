@@ -6,7 +6,7 @@ mod export;
 use btr_types::{IntField, IntIndex};
 use clap::{Parser, Subcommand};
 use odbc_api::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 const DEFAULT_DB: &str = concat!(env!("WXBTRV_CONFIG_DIR"), "\\wxbtrv.db");
@@ -377,7 +377,7 @@ fn run(cli: &Cli) -> Result<(), String> {
 }
 
 fn do_show_table_config(
-    db_path: &PathBuf,
+    db_path: &Path,
     table: &str,
     path: &str,
     discover: bool,
@@ -528,7 +528,7 @@ fn do_show_table_config(
 
             let (nt, len) = match dtype.as_str() {
                 "char" | "nchar" => (0i32, maxlen.max(1)),
-                "varchar" | "nvarchar" => (0, maxlen.max(1).min(255)),
+                "varchar" | "nvarchar" => (0, maxlen.clamp(1, 255)),
                 "int" => (1, 4),
                 "smallint" => (1, 2),
                 "tinyint" => (14, 1),
@@ -538,7 +538,7 @@ fn do_show_table_config(
                 "bit" => (7, 1),
                 "datetime" | "datetime2" => (3, 8),
                 "date" => (3, 4),
-                _ => (0, maxlen.max(1).min(255)),
+                _ => (0, maxlen.clamp(1, 255)),
             };
 
             fields.push(IntField {

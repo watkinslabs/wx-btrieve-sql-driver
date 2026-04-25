@@ -295,7 +295,7 @@ fn resolve_collation(conn: &rusqlite::Connection, cli_override: Option<&str>) ->
 
 // ── info command ───────────────────────────────────────────────────────────────
 
-fn cmd_info(path: &PathBuf) -> Result<(), String> {
+fn cmd_info(path: &Path) -> Result<(), String> {
     let bf = bfile::BtrieveFile::open(path)?;
     let h = &bf.header;
     println!("File:              {}", path.display());
@@ -348,6 +348,7 @@ fn cmd_info(path: &PathBuf) -> Result<(), String> {
 
 // ── import one file ────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn import_file(
     path: &Path,
     int_file: &btr_types::IntFile,
@@ -419,9 +420,9 @@ fn import_file(
 
 // ── directory collector ────────────────────────────────────────────────────────
 
-fn collect_b_files(dir: &PathBuf, recursive: bool) -> Vec<PathBuf> {
+fn collect_b_files(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.clone()];
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else {
             continue;
@@ -430,14 +431,13 @@ fn collect_b_files(dir: &PathBuf, recursive: bool) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() && recursive {
                 stack.push(path);
-            } else if path.is_file() {
-                if path
+            } else if path.is_file()
+                && path
                     .extension()
                     .map(|e| e.to_string_lossy().eq_ignore_ascii_case("b"))
                     .unwrap_or(false)
-                {
-                    out.push(path);
-                }
+            {
+                out.push(path);
             }
         }
     }

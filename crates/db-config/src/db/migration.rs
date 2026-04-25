@@ -88,7 +88,8 @@ pub fn epoch_to_iso(secs: u64) -> String {
 pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let mut year = 1970u64;
     loop {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let leap =
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
         let yd = if leap { 366 } else { 365 };
         if days < yd {
             break;
@@ -96,7 +97,7 @@ pub fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
         days -= yd;
         year += 1;
     }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     let months = [
         31u64,
         if leap { 29 } else { 28 },

@@ -74,7 +74,11 @@ pub fn ensure_init_vdd() {
 /// The Windows `wxbtrv` shim exports `BTRCALL` / `BTRCALLID` / `_BTRCALL` /
 /// `_BTRCALLID` as `extern "system"` C ABI functions that are thin wrappers
 /// around this `pub fn`.
-pub fn btrcall_internal(
+/// # Safety
+/// All non-null pointer arguments must point at valid Btrieve-call-shaped
+/// buffers. The C ABI shims (`BTRCALL`, `_BTRCALL`, `BTRCALLID`,
+/// `_BTRCALLID`) own that contract on behalf of the legacy DOS app.
+pub unsafe fn btrcall_internal(
     operation: u16,
     position_block: *mut c_void,
     data_buffer: *mut c_void,
@@ -105,7 +109,7 @@ pub fn btrcall_internal(
     }
 
     // Strip lock-bias: ops +100, +200, +300, +400 are locking variants of base ops.
-    let base_op = if operation >= 100 && operation < 500 {
+    let base_op = if (100..500).contains(&operation) {
         operation % 100
     } else {
         operation
@@ -117,7 +121,7 @@ pub fn btrcall_internal(
         unsafe { *data_len }
     };
     if operation == 0 || base_op == 17 {
-        let path = crate::trace::cstr_from_raw(key_buffer as *const u8, 80);
+        let path = unsafe { crate::trace::cstr_from_raw(key_buffer as *const u8, 80) };
         strace!(
             "BTRCALL op={} ({}) path={:?} posblk={:?} dlen_in={} kn={}",
             operation,
@@ -203,7 +207,7 @@ pub fn btrcall_internal(
         53 => update::op_update_chunk(position_block, data_buffer as *const c_void, data_len),
         65 => stat::op_stat_extended(position_block, data_buffer, data_len),
         // Get Key variants (+50 bias).
-        55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 => get_key::op_get_key(
+        55..=63 => get_key::op_get_key(
             operation,
             position_block,
             data_buffer,

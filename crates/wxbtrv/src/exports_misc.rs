@@ -1,4 +1,11 @@
 //! Shell init, DBU*, and Mds* module-scoped exports. Non-op entry points.
+//!
+//! These functions are C ABI exports called by the DOS app (and wbexec.exe);
+//! pointer validity is the caller's contract. Marking each as
+//! `unsafe extern "system" fn` would not change the ABI but would force every
+//! Rust-internal helper that re-uses these names to wrap calls in `unsafe { }`,
+//! which adds noise without changing what's actually being verified.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::ops_exports::obtrTrace;
 use core::ffi::c_void;

@@ -1,12 +1,8 @@
 use crate::db;
 use crate::export as render;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn do_export_int(
-    db_path: &PathBuf,
-    out_dir: &PathBuf,
-    tables: &[String],
-) -> Result<(), String> {
+pub fn do_export_int(db_path: &Path, out_dir: &Path, tables: &[String]) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let server = db::get_config(&conn, "config", "SERVER")
         .map_err(|e| e.to_string())?
@@ -40,7 +36,7 @@ pub fn do_export_int(
     Ok(())
 }
 
-pub fn do_export_mds(db_path: &PathBuf, out_file: &PathBuf) -> Result<(), String> {
+pub fn do_export_mds(db_path: &Path, out_file: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let rows = db::get_all_config(&conn).map_err(|e| e.to_string())?;
     let text = render::render_mds(&rows);
@@ -50,7 +46,7 @@ pub fn do_export_mds(db_path: &PathBuf, out_file: &PathBuf) -> Result<(), String
 }
 
 pub fn do_gen_ddl(
-    db_path: &PathBuf,
+    db_path: &Path,
     out: Option<&PathBuf>,
     add_recnum: bool,
     tables: &[String],

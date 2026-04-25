@@ -90,7 +90,7 @@ pub fn parse_schema(path: &Path) -> Result<BtrieveSchema, String> {
 
     if !is_v6 {
         let vc = (head[6] as u16) << 8 | head[7] as u16;
-        if !matches!(vc, 3 | 4 | 5) {
+        if !matches!(vc, 3..=5) {
             return Err(format!(
                 "not a recognised Btrieve file (v6 magic absent, v5 version code {vc:#x})"
             ));

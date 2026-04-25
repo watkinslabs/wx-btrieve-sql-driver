@@ -201,8 +201,7 @@ pub(super) fn op_update_chunk(
     }
 
     let mut chunks: Vec<(usize, usize)> = Vec::new();
-    let data_start: usize;
-    match flavor {
+    let data_start: usize = match flavor {
         Flavor::Random => {
             let n_chunks = u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]) as usize;
             let next_off = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
@@ -235,7 +234,7 @@ pub(super) fn op_update_chunk(
                 chunks.push((off, len));
                 hdr_off += 8;
             }
-            data_start = hdr_off;
+            hdr_off
         }
         Flavor::Rectangle => {
             // Layout: sig(4) numChunks(4) chunkSize(4) stride(4) firstOffset(4)
@@ -260,10 +259,10 @@ pub(super) fn op_update_chunk(
             for i in 0..n_chunks {
                 chunks.push((first_off + i * stride, chunk_sz));
             }
-            data_start = 20;
+            20
         }
         Flavor::Truncate => unreachable!(),
-    }
+    };
     let mut data_ptr = data_start;
 
     // Fetch current record.

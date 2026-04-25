@@ -28,9 +28,8 @@ pub(super) fn fetch_keyset_one(
     } else {
         1 + meta.fields.len()
     };
-    let row = fetch_one_row(sql, n_cols).map_err(|e| {
+    let row = fetch_one_row(sql, n_cols).inspect_err(|e| {
         strace!("fetch_keyset_one err={} table={}", e, meta.table_name);
-        e
     })?;
     let recnum = row[0].trim().parse::<i64>().unwrap_or(0);
     let fields: Vec<String> = if recnum_is_field {
@@ -127,11 +126,11 @@ pub fn col_to_sql_literal(field: &crate::state::IntField, val: &str) -> String {
 }
 
 /// Pick an index by key_num. No fallback — returns None if no match.
-pub(super) fn pick_index<'a>(
-    meta: &'a TableMeta,
+pub(super) fn pick_index(
+    meta: &TableMeta,
     key_num: i16,
     current: Option<u32>,
-) -> Option<&'a RuntimeIndex> {
+) -> Option<&RuntimeIndex> {
     if key_num == -1 {
         current.and_then(|n| meta.indexes.iter().find(|ix| ix.num == n))
     } else {
@@ -450,9 +449,9 @@ pub(super) fn build_filter_where(terms: &[TermClause]) -> String {
     for t in terms {
         let clause = format!("{} {} {}", t.col_ref, t.cmp, t.literal);
         or_groups.last_mut().unwrap().push(clause);
-        match t.connector {
-            '|' => or_groups.push(Vec::new()),
-            _ => {} // '&' or '.' → stay in same AND group
+        // '&' or '.' stays in the same AND group; '|' starts a new OR.
+        if t.connector == '|' {
+            or_groups.push(Vec::new());
         }
     }
     let parts: Vec<String> = or_groups

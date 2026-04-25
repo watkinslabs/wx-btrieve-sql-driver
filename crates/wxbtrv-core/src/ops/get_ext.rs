@@ -124,19 +124,14 @@ fn fetch_one_extended(
     let order_by = build_order_by_cols(&col_refs, dir, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
-    let base_where = if !last_keys.is_empty() && last_rn.is_some() {
+    let base_where = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
             .zip(last_keys.iter())
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
             .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
             .collect();
-        Some(build_continuation_where(
-            &key_cols,
-            dir,
-            last_rn.unwrap(),
-            &rc,
-        ))
+        Some(build_continuation_where(&key_cols, dir, rn, &rc))
     } else {
         None
     };

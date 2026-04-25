@@ -2,16 +2,16 @@ use crate::db;
 use btr_types::type_name;
 use btr_types::{IndexSegment, IntField, IntIndex};
 use odbc_api::{ConnectionOptions, Environment};
-use std::path::PathBuf;
+use std::path::Path;
 
-pub fn do_init(db_path: &PathBuf) -> Result<(), String> {
+pub fn do_init(db_path: &Path) -> Result<(), String> {
     let conn = db::init(db_path).map_err(|e| e.to_string())?;
     db::create_schema(&conn).map_err(|e| e.to_string())?;
     println!("initialized: {}", db_path.display());
     Ok(())
 }
 
-pub fn do_list(db_path: &PathBuf) -> Result<(), String> {
+pub fn do_list(db_path: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let rows = db::list_tables(&conn).map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -37,7 +37,7 @@ pub fn do_list(db_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-pub fn do_show(db_path: &PathBuf, name: &str, source_dir: Option<&str>) -> Result<(), String> {
+pub fn do_show(db_path: &Path, name: &str, source_dir: Option<&str>) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let f = db::get_table(&conn, name, source_dir)
         .map_err(|e| e.to_string())?
@@ -111,7 +111,7 @@ pub fn do_show(db_path: &PathBuf, name: &str, source_dir: Option<&str>) -> Resul
     Ok(())
 }
 
-pub fn do_show_config(db_path: &PathBuf) -> Result<(), String> {
+pub fn do_show_config(db_path: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let rows = db::get_all_config(&conn).map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -129,7 +129,7 @@ pub fn do_show_config(db_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-pub fn do_test_connection(db_path: &PathBuf) -> Result<(), String> {
+pub fn do_test_connection(db_path: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
 
     let get = |key: &str| -> String {
@@ -310,12 +310,7 @@ pub fn do_test_connection(db_path: &PathBuf) -> Result<(), String> {
     }
 }
 
-pub fn do_set_config(
-    db_path: &PathBuf,
-    section: &str,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+pub fn do_set_config(db_path: &Path, section: &str, key: &str, value: &str) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::upsert_config(
         &conn,
@@ -328,15 +323,16 @@ pub fn do_set_config(
     Ok(())
 }
 
-pub fn do_set_table(db_path: &PathBuf, table: &str, key: &str, value: &str) -> Result<(), String> {
+pub fn do_set_table(db_path: &Path, table: &str, key: &str, value: &str) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::update_table_prop(&conn, table, key, value)?;
     println!("updated {table}.{key} = {value}");
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn do_add_field(
-    db_path: &PathBuf,
+    db_path: &Path,
     table: &str,
     num: u32,
     name: &str,
@@ -361,7 +357,7 @@ pub fn do_add_field(
     Ok(())
 }
 
-pub fn do_rm_field(db_path: &PathBuf, table: &str, num: u32) -> Result<(), String> {
+pub fn do_rm_field(db_path: &Path, table: &str, num: u32) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::delete_field_by_name(&conn, table, num)?;
     println!("removed field #{num} from {table}");
@@ -369,7 +365,7 @@ pub fn do_rm_field(db_path: &PathBuf, table: &str, num: u32) -> Result<(), Strin
 }
 
 pub fn do_add_index(
-    db_path: &PathBuf,
+    db_path: &Path,
     table: &str,
     num: u32,
     fields_str: &str,
@@ -461,14 +457,14 @@ pub fn do_add_index(
     Ok(())
 }
 
-pub fn do_rm_index(db_path: &PathBuf, table: &str, num: u32) -> Result<(), String> {
+pub fn do_rm_index(db_path: &Path, table: &str, num: u32) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::delete_index_by_name(&conn, table, num)?;
     println!("removed index #{num} from {table}");
     Ok(())
 }
 
-pub fn do_rm_table(db_path: &PathBuf, table: &str) -> Result<(), String> {
+pub fn do_rm_table(db_path: &Path, table: &str) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let found = db::delete_table(&conn, table).map_err(|e| e.to_string())?;
     if found {
@@ -478,9 +474,9 @@ pub fn do_rm_table(db_path: &PathBuf, table: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
+#[allow(clippy::too_many_arguments)]
 pub fn do_set_connection(
-    db_path: &PathBuf,
+    db_path: &Path,
     server: Option<&str>,
     database: Option<&str>,
     schema: Option<&str>,

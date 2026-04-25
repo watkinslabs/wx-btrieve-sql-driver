@@ -133,7 +133,7 @@ pub fn unpack_row(fields: &[IntField], record: &[u8]) -> Vec<(String, String)> {
                         let day = slice[0] as u16;
                         let month = slice[1] as u16;
                         let year = slice[2] as u16 | ((slice[3] as u16) << 8);
-                        if year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+                        if year > 0 && (1..=12).contains(&month) && (1..=31).contains(&day) {
                             format!("'{:04}-{:02}-{:02}'", year, month, day)
                         } else {
                             f.default_value

@@ -243,22 +243,24 @@ pub extern "system" fn VDDDispatch() {
 
     // ── Pre-call: match DEV B tracer format exactly ────────────────────────────
     if op_base == 0 {
-        let path = cstr_from_raw(keybuf as *const u8, 255);
+        let path = unsafe { cstr_from_raw(keybuf as *const u8, 255) };
         trace(&format!(
             "#{seq} >> Open path={path:?} keynum={disp_keynum} keylen={disp_keylen} dlen_in={dlen}"
         ));
     } else {
         let fname = wxbtrv_core::state::handle_name(posblk as u32);
-        let key_str = key_as_ascii(keybuf as *const u8, 64);
+        let key_str = unsafe { key_as_ascii(keybuf as *const u8, 64) };
         trace(&format!("#{seq} >> {op_nm} handle={fname:?} key={key_str} keynum={disp_keynum} keylen={disp_keylen} dlen_in={dlen}"));
     }
     // Raw BTRCALL hex dump (matches DEV B format)
-    let posblk_hex = hex_bytes(posblk as *const u8, 8);
-    let keybuf_hex = hex_bytes(keybuf as *const u8, 255);
+    let posblk_hex = unsafe { hex_bytes(posblk as *const u8, 8) };
+    let keybuf_hex = unsafe { hex_bytes(keybuf as *const u8, 255) };
     trace(&format!("#{seq} BTRCALL op={op:#06x}({op_nm}) posblk=[{posblk_hex}] dlen_in={dlen} key=[{keybuf_hex}] keynum={disp_keynum} keylen={disp_keylen}"));
 
     // Dispatch into local buffers (data and keybuf are our private copies)
-    let rc = wxbtrv_core::ops::btrcall_internal(op, posblk, data, &mut dlen, keybuf, key_num, acs);
+    let rc = unsafe {
+        wxbtrv_core::ops::btrcall_internal(op, posblk, data, &mut dlen, keybuf, key_num, acs)
+    };
 
     // No copy-back needed — with corrected BtrCallBlock layout (offset 0x00 = data_buf_ptr),
     // data and key buffers are in separate non-overlapping DOS memory regions.
@@ -267,7 +269,7 @@ pub extern "system" fn VDDDispatch() {
 
     // Raw BTRCALL result line (matches DEV B format)
     if dlen > 0 {
-        let data_hex = hex_bytes(data as *const u8, dlen as usize);
+        let data_hex = unsafe { hex_bytes(data as *const u8, dlen as usize) };
         trace(&format!(
             "#{seq} BTRCALL => rc={rc} dlen_out={dlen} data=[{data_hex}]"
         ));
@@ -280,10 +282,10 @@ pub extern "system" fn VDDDispatch() {
     // Human-readable summary (matches DEV B << format)
     if rc == 0 {
         if op_base == 0 {
-            let path = cstr_from_raw(keybuf as *const u8, 255);
+            let path = unsafe { cstr_from_raw(keybuf as *const u8, 255) };
             trace(&format!("#{seq} << Open OK path={path:?}"));
         } else if dlen > 0 {
-            let text = data_as_text(data as *const u8, (dlen as usize).min(80));
+            let text = unsafe { data_as_text(data as *const u8, (dlen as usize).min(80)) };
             trace(&format!(
                 "#{seq} << {op_nm} OK dlen_out={dlen} data_text={text}"
             ));
@@ -292,7 +294,7 @@ pub extern "system" fn VDDDispatch() {
         }
     } else {
         if op_base == 0 {
-            let path = cstr_from_raw(keybuf as *const u8, 255);
+            let path = unsafe { cstr_from_raw(keybuf as *const u8, 255) };
             trace(&format!("#{seq} << Open FAILED rc={rc} path={path:?}"));
         } else {
             trace(&format!("#{seq} << {op_nm} rc={rc}"));
@@ -319,13 +321,13 @@ pub extern "system" fn VDDDispatch() {
     }
 
     // Final: trace what we actually wrote back to DOS memory
-    let posblk_final = hex_bytes(posblk as *const u8, 8);
+    let posblk_final = unsafe { hex_bytes(posblk as *const u8, 8) };
     let data_final = if !data.is_null() && dlen > 0 {
-        hex_bytes(data as *const u8, dlen as usize)
+        unsafe { hex_bytes(data as *const u8, dlen as usize) }
     } else {
         String::from("<null>")
     };
-    let key_final = hex_bytes(keybuf as *const u8, 16);
+    let key_final = unsafe { hex_bytes(keybuf as *const u8, 16) };
     trace(&format!("#{seq} DOS-WRITEBACK rc={rc} dlen_wb={dlen} posblk=[{posblk_final}] keybuf=[{key_final}] data=[{}]",
-        if dlen > 32 { format!("{}..+{}b", hex_bytes(data as *const u8, 32), dlen - 32) } else { data_final }));
+        if dlen > 32 { format!("{}..+{}b", unsafe { hex_bytes(data as *const u8, 32) }, dlen - 32) } else { data_final }));
 }

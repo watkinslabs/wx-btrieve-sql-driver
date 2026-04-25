@@ -11,6 +11,7 @@ fn normalize_key(s: &str) -> String {
 /// Look up table metadata. The path determines which database to use via tiered config:
 /// 1. If path given → resolve directory config → get DATABASE → search that db only
 /// 2. If no path → use global config DATABASE → search that db only
+///
 /// Never cross databases. If not found in the resolved db, return None (caller can discover).
 pub fn get_table_meta_for_path(name: &str, path: &str) -> Option<TableMeta> {
     let k = name.trim().to_ascii_uppercase();

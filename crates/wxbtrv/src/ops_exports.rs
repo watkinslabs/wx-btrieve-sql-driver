@@ -2,6 +2,10 @@
 //!
 //! All real dispatch work lives in `wxbtrv_core::ops::btrcall_internal`; the
 //! wrappers here exist only so the cdylib exposes the Windows-linkable C ABI.
+//!
+//! These exports are called from C across an FFI boundary; pointer validity
+//! is the caller's contract.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use core::ffi::c_void;
 use std::sync::atomic::AtomicI32;
@@ -33,15 +37,17 @@ pub extern "system" fn BTRCALL(
     key_num: i16,
     acs: *mut i8,
 ) -> i32 {
-    btrcall_internal(
-        operation,
-        position_block,
-        data_buffer,
-        data_len,
-        key_buffer,
-        key_num,
-        acs,
-    )
+    unsafe {
+        btrcall_internal(
+            operation,
+            position_block,
+            data_buffer,
+            data_len,
+            key_buffer,
+            key_num,
+            acs,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]

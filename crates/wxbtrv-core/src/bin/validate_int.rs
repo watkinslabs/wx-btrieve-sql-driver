@@ -383,8 +383,8 @@ fn main() {
         dir.display()
     );
     println!(
-        "{:<30} {:<20} {:<8} {:<6} {:<6}  {}",
-        "FILE", "TABLE", "RECNUM_COL", "PI", "NFLD", "INDEXES (num:fields:dir)"
+        "{:<30} {:<20} {:<8} {:<6} {:<6}  INDEXES (num:fields:dir)",
+        "FILE", "TABLE", "RECNUM_COL", "PI", "NFLD"
     );
     println!("{}", "-".repeat(110));
 
@@ -396,7 +396,7 @@ fn main() {
         let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
 
         // Try reading as UTF-8; fall back to lossy
-        let text = match fs::read(&path) {
+        let text = match fs::read(path) {
             Err(e) => {
                 eprintln!("FAIL  {fname}: read error: {e}");
                 failed += 1;
@@ -449,13 +449,14 @@ fn main() {
 
         // Flag any table where recnum_col is MDS_RECNUM but there IS a primary_index
         // (that would mean primary_index parsing failed)
-        if meta.primary_index.is_some() && meta.recnum_col == "MDS_RECNUM" {
-            let msg = format!(
-                "  !! {fname}: PRIMARY_INDEX={} but recnum_col=MDS_RECNUM — index lookup failed!",
-                meta.primary_index.unwrap()
-            );
-            println!("{msg}");
-            issues.push(msg);
+        if let Some(pi) = meta.primary_index {
+            if meta.recnum_col == "MDS_RECNUM" {
+                let msg = format!(
+                    "  !! {fname}: PRIMARY_INDEX={pi} but recnum_col=MDS_RECNUM — index lookup failed!"
+                );
+                println!("{msg}");
+                issues.push(msg);
+            }
         }
 
         // Flag any index that has a DESCENDING segment but the table would ORDER by it ASC

@@ -458,7 +458,7 @@ pub fn base_opcode(code: u16) -> u16 {
 /// Detect the Get Key (+50) bias — if set, the op should not return record data.
 pub fn has_key_bias(code: u16) -> bool {
     let without_locks = code % 100;
-    without_locks >= 50 && without_locks < 100
+    (50..100).contains(&without_locks)
 }
 
 /// Detect lock bias.

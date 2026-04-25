@@ -2,12 +2,12 @@ use crate::btrieve;
 use crate::db;
 use btr_types::parser::parse_int;
 use btr_types::parser::parse_mds;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Collect all .INT file paths under `dir`, recursively if requested.
-fn collect_int_files(dir: &PathBuf, recursive: bool) -> Vec<std::path::PathBuf> {
+fn collect_int_files(dir: &Path, recursive: bool) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.clone()];
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else {
             continue;
@@ -29,7 +29,7 @@ fn collect_int_files(dir: &PathBuf, recursive: bool) -> Vec<std::path::PathBuf> 
 }
 
 pub fn do_import_int(
-    db_path: &PathBuf,
+    db_path: &Path,
     dirs: &[PathBuf],
     recursive: bool,
     db_name_override: Option<&str>,
@@ -113,7 +113,7 @@ pub fn do_import_int(
     Ok(())
 }
 
-pub fn do_import_mds(db_path: &PathBuf, file: &PathBuf) -> Result<(), String> {
+pub fn do_import_mds(db_path: &Path, file: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let cfg = parse_mds(&text);
@@ -138,8 +138,8 @@ pub fn do_import_mds(db_path: &PathBuf, file: &PathBuf) -> Result<(), String> {
 }
 
 pub fn do_analyze_b(
-    db_path: &PathBuf,
-    file: &PathBuf,
+    db_path: &Path,
+    file: &Path,
     table_override: Option<&str>,
 ) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;

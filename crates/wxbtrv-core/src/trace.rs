@@ -59,7 +59,7 @@ mod debug_trace {
     }
 
     thread_local! {
-        static CURRENT_SEQ: Cell<u32> = Cell::new(0);
+        static CURRENT_SEQ: Cell<u32> = const { Cell::new(0) };
     }
 
     pub fn set_seq(s: u32) {
@@ -238,7 +238,10 @@ mod debug_trace {
     }
 
     /// Read a null-terminated path or string from a raw pointer (up to max bytes).
-    pub fn cstr_from_raw(ptr: *const u8, max: usize) -> String {
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of `max` bytes (or null).
+    pub unsafe fn cstr_from_raw(ptr: *const u8, max: usize) -> String {
         if ptr.is_null() || max == 0 {
             return "<null>".into();
         }
@@ -248,7 +251,10 @@ mod debug_trace {
     }
 
     /// Decode a key buffer as printable ASCII (non-printable → '.'), stops at null or max_len.
-    pub fn key_as_ascii(ptr: *const u8, max_len: usize) -> String {
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of `max_len` bytes (or null).
+    pub unsafe fn key_as_ascii(ptr: *const u8, max_len: usize) -> String {
         if ptr.is_null() || max_len == 0 {
             return "<null>".into();
         }
@@ -260,7 +266,7 @@ mod debug_trace {
         let s: String = bytes[..end]
             .iter()
             .map(|&b| {
-                if b >= 0x20 && b < 0x7f {
+                if (0x20..0x7f).contains(&b) {
                     b as char
                 } else {
                     '.'
@@ -271,7 +277,10 @@ mod debug_trace {
     }
 
     /// Show up to max_len bytes as printable ASCII (non-printable → '.').
-    pub fn data_as_text(ptr: *const u8, max_len: usize) -> String {
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of `max_len` bytes (or null).
+    pub unsafe fn data_as_text(ptr: *const u8, max_len: usize) -> String {
         if ptr.is_null() || max_len == 0 {
             return "<null>".into();
         }
@@ -279,7 +288,7 @@ mod debug_trace {
         let s: String = bytes
             .iter()
             .map(|&b| {
-                if b >= 0x20 && b < 0x7f {
+                if (0x20..0x7f).contains(&b) {
                     b as char
                 } else {
                     '.'
@@ -290,7 +299,10 @@ mod debug_trace {
     }
 
     /// Hex dump of raw bytes, space-separated.
-    pub fn hex_bytes(ptr: *const u8, len: usize) -> String {
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of `len` bytes (or null).
+    pub unsafe fn hex_bytes(ptr: *const u8, len: usize) -> String {
         if ptr.is_null() || len == 0 {
             return String::new();
         }

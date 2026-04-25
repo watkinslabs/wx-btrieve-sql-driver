@@ -19,6 +19,7 @@ use core::ffi::c_void;
 /// WHERE comparing the caller's key buffer against the segment columns
 /// with `cmp`, and stores the resulting row + segment values as the new
 /// logical position. `not_found_rc` is the key-specific not-found status.
+#[allow(clippy::too_many_arguments)] // mirrors the Btrieve C-ABI signature
 pub(super) fn op_get_by_key(
     posblk: *mut c_void,
     data_buf: *mut c_void,
@@ -463,14 +464,14 @@ pub(super) fn op_get_next(
     let order_by = build_order_by_cols(&col_refs, 1, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
-    let sql = if !last_keys.is_empty() && last_rn.is_some() {
+    let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
             .zip(last_keys.iter())
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
             .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
             .collect();
-        let where_clause = build_continuation_where(&key_cols, 1, last_rn.unwrap(), &rc);
+        let where_clause = build_continuation_where(&key_cols, 1, rn, &rc);
         format!("SELECT TOP 1 {cols} FROM {tref} WHERE {where_clause} ORDER BY {order_by}")
     } else {
         format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {order_by}")
@@ -550,14 +551,14 @@ pub(super) fn op_get_prev(
     let order_by = build_order_by_cols(&col_refs, -1, true, &rc);
     let tref = meta.table_ref("", "");
     let cols = meta.select_with_recnum();
-    let sql = if !last_keys.is_empty() && last_rn.is_some() {
+    let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
         let key_cols: Vec<(String, String, bool)> = col_refs
             .iter()
             .zip(last_keys.iter())
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
             .map(|((cr, val), d)| (cr.0.clone(), val.clone(), d))
             .collect();
-        let where_clause = build_continuation_where(&key_cols, -1, last_rn.unwrap(), &rc);
+        let where_clause = build_continuation_where(&key_cols, -1, rn, &rc);
         format!("SELECT TOP 1 {cols} FROM {tref} WHERE {where_clause} ORDER BY {order_by}")
     } else {
         format!("SELECT TOP 1 {cols} FROM {tref} ORDER BY {order_by}")

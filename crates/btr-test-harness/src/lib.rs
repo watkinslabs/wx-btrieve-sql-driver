@@ -459,15 +459,17 @@ pub fn fixture_open(path: &str) -> (Box<[u8; 128]>, i32) {
     let bytes = path.as_bytes();
     key_buf[..bytes.len()].copy_from_slice(bytes);
     let mut dlen: u32 = 0;
-    let rc = wxbtrv_core::ops::btrcall_internal(
-        0,
-        posblk.as_mut_ptr() as *mut core::ffi::c_void,
-        std::ptr::null_mut(),
-        &mut dlen as *mut u32,
-        key_buf.as_mut_ptr() as *mut core::ffi::c_void,
-        0,
-        std::ptr::null_mut(),
-    );
+    let rc = unsafe {
+        wxbtrv_core::ops::btrcall_internal(
+            0,
+            posblk.as_mut_ptr() as *mut core::ffi::c_void,
+            std::ptr::null_mut(),
+            &mut dlen as *mut u32,
+            key_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
     (posblk, rc)
 }
 
@@ -481,13 +483,15 @@ pub fn btrcall(
     key_buf: &mut [u8],
     key_num: i16,
 ) -> i32 {
-    wxbtrv_core::ops::btrcall_internal(
-        op,
-        posblk.as_mut_ptr() as *mut core::ffi::c_void,
-        data_buf.as_mut_ptr() as *mut core::ffi::c_void,
-        data_len as *mut u32,
-        key_buf.as_mut_ptr() as *mut core::ffi::c_void,
-        key_num,
-        std::ptr::null_mut(),
-    )
+    unsafe {
+        wxbtrv_core::ops::btrcall_internal(
+            op,
+            posblk.as_mut_ptr() as *mut core::ffi::c_void,
+            data_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            data_len as *mut u32,
+            key_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            key_num,
+            std::ptr::null_mut(),
+        )
+    }
 }

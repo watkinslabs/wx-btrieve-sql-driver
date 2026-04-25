@@ -1,7 +1,5 @@
-use crate::constants::{ERR_CONTEXT_SETUP, ERR_NOT_LOADED};
+use crate::constants::ERR_NOT_LOADED;
 use crate::state::{set_err, IS_INITIALIZED};
-use core::ffi::c_char;
-use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
@@ -30,14 +28,6 @@ pub fn dll_dir() -> Option<PathBuf> {
 #[cfg(not(windows))]
 pub fn dll_dir() -> Option<PathBuf> {
     None
-}
-
-pub fn cstr(ptr_in: *const c_char) -> Result<String, i32> {
-    if ptr_in.is_null() {
-        return Err(set_err(ERR_CONTEXT_SETUP));
-    }
-    let s = unsafe { CStr::from_ptr(ptr_in) };
-    Ok(s.to_string_lossy().into_owned())
 }
 
 pub fn ensure_init() -> Result<(), i32> {

@@ -7,7 +7,7 @@ pub fn render_int(f: &IntFile, server: &str) -> String {
 
     // Header
     if !server.is_empty() {
-        out.push_str(&format!("DRIVER_NAME SQL_BTR\n"));
+        out.push_str("DRIVER_NAME SQL_BTR\n");
         out.push_str(&format!("SERVER_NAME {server}\n"));
     }
     if !f.db_name.is_empty() {
@@ -141,12 +141,9 @@ pub fn render_ddl(f: &IntFile, add_recnum: bool) -> String {
 
     for field in &f.fields {
         let sql_type = btr_to_sql(field.native_type, field.length);
-        let nullable = if field.default_value.is_some() {
-            "NULL"
-        } else {
-            "NULL"
-        };
-        cols.push(format!("    [{}] {} {}", field.name, sql_type, nullable));
+        // Btrieve fields are nullable in SQL Server regardless of whether
+        // the .INT specified a default value.
+        cols.push(format!("    [{}] {} NULL", field.name, sql_type));
     }
 
     out.push_str(&cols.join(",\n"));

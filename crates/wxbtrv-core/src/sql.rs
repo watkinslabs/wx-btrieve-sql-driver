@@ -181,12 +181,12 @@ where
         trace(&format!("sql: conn_str={}", display));
         match env.connect_with_connection_string(&cs, ConnectionOptions::default()) {
             Ok(conn) => {
-                trace(&format!("sql: connected OK"));
+                trace("sql: connected OK");
                 *g = Some(conn);
             }
             Err(e) => {
                 // Log each ODBC diagnostic record for full error detail
-                trace(&format!("sql: CONNECT FAILED"));
+                trace("sql: CONNECT FAILED");
                 trace(&format!("sql:   conn_str={}", display));
                 trace(&format!("sql:   error={}", e));
                 return Err(set_err(ERR_CONTEXT_SETUP));
@@ -468,7 +468,10 @@ pub fn discover_table_meta(
     let mut offset: u32 = 0;
     let mut fnum: u32 = 1;
     for row in &col_rows {
-        let name = row.get(0).map(|s| s.trim().to_string()).unwrap_or_default();
+        let name = row
+            .first()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         let dtype = row
             .get(1)
             .map(|s| s.trim().to_lowercase())
@@ -480,7 +483,7 @@ pub fn discover_table_meta(
 
         let (nt, len) = match dtype.as_str() {
             "char" | "nchar" => (0i32, maxlen.max(1)),
-            "varchar" | "nvarchar" => (0, maxlen.max(1).min(255)),
+            "varchar" | "nvarchar" => (0, maxlen.clamp(1, 255)),
             "int" => (1, 4),
             "smallint" => (1, 2),
             "tinyint" => (14, 1),
@@ -490,7 +493,7 @@ pub fn discover_table_meta(
             "bit" => (7, 1),
             "datetime" | "datetime2" => (3, 8),
             "date" => (3, 4),
-            _ => (0, maxlen.max(1).min(255)),
+            _ => (0, maxlen.clamp(1, 255)),
         };
         fields.push(IntField {
             num: fnum,

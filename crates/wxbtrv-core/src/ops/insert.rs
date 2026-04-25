@@ -152,7 +152,7 @@ pub(super) fn op_insert(posblk: *mut c_void, data_buf: *const c_void, data_len: 
     } else {
         strace!("op_insert h={} sql={}", hid, insert_sql);
     }
-    if let Err(_) = execute_sql(&insert_sql) {
+    if execute_sql(&insert_sql).is_err() {
         return BTR_DUPLICATE_KEY;
     }
     let new_id: i64 = fetch_one_row("SELECT CAST(SCOPE_IDENTITY() AS BIGINT)", 1)

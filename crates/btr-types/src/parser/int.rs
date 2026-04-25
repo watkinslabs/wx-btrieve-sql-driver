@@ -142,6 +142,7 @@ pub fn parse(text: &str, source_file: &str) -> Result<IntFile, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flush_field(
     fields: &mut Vec<IntField>,
     num: Option<u32>,

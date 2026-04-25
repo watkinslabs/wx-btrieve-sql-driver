@@ -1,7 +1,7 @@
 use crate::db;
-use std::path::PathBuf;
+use std::path::Path;
 
-pub fn do_migration_status(db_path: &PathBuf) -> Result<(), String> {
+pub fn do_migration_status(db_path: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::upgrade_schema(&conn).map_err(|e| e.to_string())?;
     let rows = db::migration_status(&conn).map_err(|e| e.to_string())?;
@@ -14,8 +14,8 @@ pub fn do_migration_status(db_path: &PathBuf) -> Result<(), String> {
     let total = rows.len();
     println!("MIGRATION STATUS: {done}/{total} migrated\n");
     println!(
-        "{:<30} {:<24} {:>7}  {:>6}  {:<16} {}",
-        "TABLE", "SOURCE_DIR", "ROWS", "FIELDS", "TARGET_DB", "MIGRATED_AT"
+        "{:<30} {:<24} {:>7}  {:>6}  {:<16} MIGRATED_AT",
+        "TABLE", "SOURCE_DIR", "ROWS", "FIELDS", "TARGET_DB"
     );
     println!("{}", "-".repeat(100));
     for r in &rows {
@@ -41,7 +41,7 @@ pub fn do_migration_status(db_path: &PathBuf) -> Result<(), String> {
 }
 
 pub fn do_mark_migrated(
-    db_path: &PathBuf,
+    db_path: &Path,
     table: &str,
     rows: Option<i64>,
     server: &str,
@@ -54,7 +54,7 @@ pub fn do_mark_migrated(
     Ok(())
 }
 
-pub fn do_clear_migrated(db_path: &PathBuf, table: &str) -> Result<(), String> {
+pub fn do_clear_migrated(db_path: &Path, table: &str) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
     db::upgrade_schema(&conn).map_err(|e| e.to_string())?;
     db::clear_migrated(&conn, table)?;

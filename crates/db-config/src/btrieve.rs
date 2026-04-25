@@ -171,7 +171,7 @@ fn pat_lookup(
     let e = &ap[entry_off..entry_off + 4];
     let page_type = e[1];
     let phys_page = ((e[0] as u32) << 16) | ((e[3] as u32) << 8) | (e[2] as u32);
-    if phys_page == 0xFFFF_FF {
+    if phys_page == 0xFF_FFFF {
         return Ok(None);
     }
 
