@@ -73,23 +73,18 @@ pub(super) fn op_get_by_key(
         .filter_map(|(n, d)| field_map.get(n).map(|f| (dialect.quote_ident(&f.name), d)))
         .collect();
 
-    let mut params: Vec<SqlValue> = Vec::new();
-    let key_cols: Vec<(String, String)> = col_refs
+    let key_cols: Vec<(String, SqlValue)> = col_refs
         .iter()
         .zip(kf)
-        .filter_map(|((c, _), (_, opt_v))| {
-            opt_v.map(|v| {
-                params.push(v);
-                (c.clone(), dialect.param_marker(params.len()))
-            })
-        })
+        .filter_map(|((c, _), (_, opt_v))| opt_v.map(|v| (c.clone(), v)))
         .collect();
 
     if null_wildcard && key_cols.is_empty() {
         return not_found_rc;
     }
 
-    let where_clause = build_key_where(&key_cols, cmp);
+    let mut params: Vec<SqlValue> = Vec::new();
+    let where_clause = build_key_where(&key_cols, cmp, &mut params);
     let order_by = build_order_by_cols(&col_refs, dir, false, &meta.recnum_sql_ref());
     let cols = meta.select_with_recnum();
     let tref = meta.table_ref("", "");
@@ -468,18 +463,13 @@ pub(super) fn op_get_next(
     let cols = meta.select_with_recnum();
     let mut params: Vec<SqlValue> = Vec::new();
     let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
-        let key_cols: Vec<(String, String, bool)> = col_refs
+        let key_cols: Vec<(String, SqlValue, bool)> = col_refs
             .iter()
             .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| {
-                params.push(val);
-                (cr.0.clone(), dialect.param_marker(params.len()), d)
-            })
+            .map(|((cr, val), d)| (cr.0.clone(), val, d))
             .collect();
-        params.push(SqlValue::I64(rn));
-        let last_rn_marker = dialect.param_marker(params.len());
-        let where_clause = build_continuation_where_marker(&key_cols, 1, &last_rn_marker, &rc);
+        let where_clause = build_continuation_where_marker(&key_cols, 1, rn, &rc, &mut params);
         select_with_limit(dialect, 1, &cols, &tref, &where_clause, &order_by)
     } else {
         select_with_limit(dialect, 1, &cols, &tref, "", &order_by)
@@ -562,18 +552,13 @@ pub(super) fn op_get_prev(
     let cols = meta.select_with_recnum();
     let mut params: Vec<SqlValue> = Vec::new();
     let sql = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
-        let key_cols: Vec<(String, String, bool)> = col_refs
+        let key_cols: Vec<(String, SqlValue, bool)> = col_refs
             .iter()
             .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| {
-                params.push(val);
-                (cr.0.clone(), dialect.param_marker(params.len()), d)
-            })
+            .map(|((cr, val), d)| (cr.0.clone(), val, d))
             .collect();
-        params.push(SqlValue::I64(rn));
-        let last_rn_marker = dialect.param_marker(params.len());
-        let where_clause = build_continuation_where_marker(&key_cols, -1, &last_rn_marker, &rc);
+        let where_clause = build_continuation_where_marker(&key_cols, -1, rn, &rc, &mut params);
         select_with_limit(dialect, 1, &cols, &tref, &where_clause, &order_by)
     } else {
         select_with_limit(dialect, 1, &cols, &tref, "", &order_by)

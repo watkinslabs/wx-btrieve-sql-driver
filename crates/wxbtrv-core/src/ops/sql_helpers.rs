@@ -129,15 +129,16 @@ fn fetch_keyset_one_inner(
 }
 
 /// Convert a field's raw text value to a typed [`SqlValue`] suitable for
-/// binding as a query parameter. Replaces [`col_to_sql_literal`] in the
-/// parameterized op pipeline.
+/// binding as a query parameter.
 ///
-/// Type mapping mirrors the legacy literal renderer:
+/// Type mapping:
 ///   1 / 14 / 15  (INT, AUTOINC, BFLOAT) → SqlValue::I64
 ///   2            (FLOAT)                → SqlValue::F64
-///   everything else                     → SqlValue::Text (with trailing
-///                                          ASCII spaces trimmed, like the
-///                                          legacy renderer)
+///   everything else                     → SqlValue::Text (verbatim;
+///                                          no trim, since SQLite TEXT
+///                                          comparison is exact and
+///                                          MSSQL CHAR pads on either
+///                                          side of the comparison)
 pub fn col_to_sql_param(field: &crate::state::IntField, val: &str) -> SqlValue {
     match field.native_type {
         1 | 14 | 15 => {
@@ -148,7 +149,7 @@ pub fn col_to_sql_param(field: &crate::state::IntField, val: &str) -> SqlValue {
             let f = val.trim().parse::<f64>().unwrap_or(0.0);
             SqlValue::F64(f)
         }
-        _ => SqlValue::Text(val.trim_end_matches(' ').to_string()),
+        _ => SqlValue::Text(val.to_string()),
     }
 }
 
@@ -183,21 +184,18 @@ pub(super) fn pick_index(
     }
 }
 
-/// Get the SQL col-refs (bracketed) + descending flag for all segments of an index by number.
+/// Get the dialect-quoted col-refs + descending flag for all segments of an index by number.
 pub(super) fn index_col_refs(meta: &TableMeta, idx_num: u32) -> Vec<(String, bool)> {
     let Some(idx) = meta.indexes.iter().find(|ix| ix.num == idx_num) else {
         return Vec::new();
     };
+    let dialect = crate::dialect::active();
     let field_map: std::collections::HashMap<u32, &crate::state::IntField> =
         meta.fields.iter().map(|f| (f.num, f)).collect();
     idx.field_nums
         .iter()
         .zip(idx.desc.iter().copied().chain(std::iter::repeat(false)))
-        .filter_map(|(n, d)| {
-            field_map
-                .get(n)
-                .map(|f| (format!("[{}]", f.name.replace(']', "]]")), d))
-        })
+        .filter_map(|(n, d)| field_map.get(n).map(|f| (dialect.quote_ident(&f.name), d)))
         .collect()
 }
 
@@ -251,14 +249,30 @@ pub fn build_order_by_cols(
 }
 
 /// Build a compound WHERE predicate for an initial key search.
-pub fn build_key_where(key_cols: &[(String, String)], cmp: &str) -> String {
+///
+/// `key_cols` is `(col_ref, value)` pairs; values are pushed into `params`
+/// each time they're referenced in the predicate (segments appear in
+/// multiple OR clauses for inequalities). Returns the SQL fragment.
+pub fn build_key_where(
+    key_cols: &[(String, SqlValue)],
+    cmp: &str,
+    params: &mut Vec<SqlValue>,
+) -> String {
     if key_cols.is_empty() {
         return "1=1".to_string();
     }
+    let dialect = crate::dialect::active();
+    let push = |params: &mut Vec<SqlValue>, v: &SqlValue| -> String {
+        params.push(v.clone());
+        dialect.param_marker(params.len())
+    };
     if cmp == "=" {
         return key_cols
             .iter()
-            .map(|(c, v)| format!("{} = {}", c, v))
+            .map(|(c, v)| {
+                let m = push(params, v);
+                format!("{} = {}", c, m)
+            })
             .collect::<Vec<_>>()
             .join(" AND ");
     }
@@ -266,11 +280,14 @@ pub fn build_key_where(key_cols: &[(String, String)], cmp: &str) -> String {
     let n = key_cols.len();
     (0..n)
         .map(|i| {
-            let mut parts: Vec<String> = (0..i)
-                .map(|j| format!("{} = {}", key_cols[j].0, key_cols[j].1))
-                .collect();
+            let mut parts: Vec<String> = Vec::with_capacity(i + 1);
+            for kc in &key_cols[..i] {
+                let m = push(params, &kc.1);
+                parts.push(format!("{} = {}", kc.0, m));
+            }
             let this_cmp = if i == n - 1 { cmp } else { strict };
-            parts.push(format!("{} {} {}", key_cols[i].0, this_cmp, key_cols[i].1));
+            let m = push(params, &key_cols[i].1);
+            parts.push(format!("{} {} {}", key_cols[i].0, this_cmp, m));
             format!("({})", parts.join(" AND "))
         })
         .collect::<Vec<_>>()
@@ -279,15 +296,17 @@ pub fn build_key_where(key_cols: &[(String, String)], cmp: &str) -> String {
 
 /// Build a continuation WHERE predicate for Get Next / Get Prev.
 ///
-/// Each tuple in `key_cols` is `(col_ref, placeholder, is_desc)`; `last_rn_marker`
-/// is also a placeholder string. The caller maintains the parallel param vec
-/// matching marker positions.
+/// Pushes each value once per occurrence in the predicate (each segment
+/// appears N+1-i times across the i'th OR clause and the final eq_all
+/// clause). `last_rn` is pushed once.
 pub fn build_continuation_where_marker(
-    key_cols: &[(String, String, bool)],
+    key_cols: &[(String, SqlValue, bool)],
     dir: i8,
-    last_rn_marker: &str,
+    last_rn: i64,
     recnum_expr: &str,
+    params: &mut Vec<SqlValue>,
 ) -> String {
+    let dialect = crate::dialect::active();
     let forward = dir >= 0;
     let seg_cmp = |is_desc: bool| -> &'static str {
         if forward ^ is_desc {
@@ -296,31 +315,37 @@ pub fn build_continuation_where_marker(
             "<"
         }
     };
+    let push = |params: &mut Vec<SqlValue>, v: &SqlValue| -> String {
+        params.push(v.clone());
+        dialect.param_marker(params.len())
+    };
     if key_cols.is_empty() {
         let cmp = if forward { ">" } else { "<" };
-        return format!("{} {} {}", recnum_expr, cmp, last_rn_marker);
+        let m = push(params, &SqlValue::I64(last_rn));
+        return format!("{} {} {}", recnum_expr, cmp, m);
     }
     let n = key_cols.len();
-    let mut clauses: Vec<String> = (0..n)
-        .map(|i| {
-            let mut parts: Vec<String> = (0..i)
-                .map(|j| format!("{} = {}", key_cols[j].0, key_cols[j].1))
-                .collect();
-            let cmp = seg_cmp(key_cols[i].2);
-            parts.push(format!("{} {} {}", key_cols[i].0, cmp, key_cols[i].1));
-            format!("({})", parts.join(" AND "))
-        })
-        .collect();
-    let eq_all = key_cols
-        .iter()
-        .map(|(c, v, _)| format!("{} = {}", c, v))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    let mut clauses: Vec<String> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        let mut parts: Vec<String> = Vec::with_capacity(i + 1);
+        for kc in &key_cols[..i] {
+            let m = push(params, &kc.1);
+            parts.push(format!("{} = {}", kc.0, m));
+        }
+        let cmp = seg_cmp(key_cols[i].2);
+        let m = push(params, &key_cols[i].1);
+        parts.push(format!("{} {} {}", key_cols[i].0, cmp, m));
+        clauses.push(format!("({})", parts.join(" AND ")));
+    }
+    let mut eq_parts: Vec<String> = Vec::with_capacity(n + 1);
+    for kc in key_cols {
+        let m = push(params, &kc.1);
+        eq_parts.push(format!("{} = {}", kc.0, m));
+    }
     let rn_cmp = if forward { ">" } else { "<" };
-    clauses.push(format!(
-        "({} AND {} {} {})",
-        eq_all, recnum_expr, rn_cmp, last_rn_marker
-    ));
+    let rn_marker = push(params, &SqlValue::I64(last_rn));
+    eq_parts.push(format!("{} {} {}", recnum_expr, rn_cmp, rn_marker));
+    clauses.push(format!("({})", eq_parts.join(" AND ")));
     clauses.join(" OR ")
 }
 
@@ -592,7 +617,7 @@ mod filter_tests {
         assert_eq!(terms.len(), 1);
         assert_eq!(terms[0].col_ref, "[NAME]");
         assert_eq!(terms[0].cmp, "=");
-        assert_eq!(terms[0].value, SqlValue::Text("ALPHA".into()));
+        assert_eq!(terms[0].value, SqlValue::Text("ALPHA     ".into()));
     }
 
     #[test]

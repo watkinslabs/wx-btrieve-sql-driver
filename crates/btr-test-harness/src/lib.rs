@@ -22,6 +22,38 @@ use std::sync::{Mutex, OnceLock};
 pub const TEST_DB_NAME: &str = "WXBTRV_TEST";
 pub const TEST_TABLE: &str = "TEST_CUST";
 
+/// Backend the harness drives. Set via `BTR_TEST_BACKEND` env
+/// (`mssql` | `sqlite`). Defaults to `mssql` for back-compat.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HarnessBackend {
+    Mssql,
+    Sqlite,
+}
+
+pub fn current_backend() -> HarnessBackend {
+    match std::env::var("BTR_TEST_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "sqlite" | "sqlite3" => HarnessBackend::Sqlite,
+        _ => HarnessBackend::Mssql,
+    }
+}
+
+/// Path to the per-process SQLite fixture file (when running on the
+/// SQLite backend). Stable across `reset_fixture()` calls within a single
+/// test binary so that the wxbtrv.db config can point at it.
+fn sqlite_fixture_path() -> PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = tempdir();
+        dir.join("wxbtrv-test.sqlite")
+    })
+    .clone()
+}
+
 /// ODBC conn string targeting `master` — used only for schema bootstrap.
 pub fn bootstrap_connection_string() -> String {
     let server = std::env::var("BTR_TEST_SERVER").unwrap_or_else(|_| "localhost,1433".into());
@@ -43,6 +75,10 @@ fn fixtures_dir() -> PathBuf {
 
 fn schema_sql_path() -> PathBuf {
     fixtures_dir().join("schema.sql")
+}
+
+fn schema_sqlite_path() -> PathBuf {
+    fixtures_dir().join("schema_sqlite.sql")
 }
 
 /// Reset the SQL Server fixture: run schema.sql against master.
@@ -195,24 +231,48 @@ pub fn build_fixture_wxbtrv_db() -> PathBuf {
     )
     .expect("schema");
 
-    let server = std::env::var("BTR_TEST_SERVER").unwrap_or_else(|_| "localhost,1433".into());
-    let user = std::env::var("BTR_TEST_USER").unwrap_or_else(|_| "sa".into());
-    let pass = std::env::var("BTR_TEST_PASS").unwrap_or_else(|_| "WxTest!2024".into());
+    // The harness still records a SERVER value in the table-row metadata
+    // even on SQLite (it's just text in btr_tables.server_name). For
+    // SQLite we use the .sqlite path; for MSSQL the real server string.
+    let server = match current_backend() {
+        HarnessBackend::Mssql => {
+            std::env::var("BTR_TEST_SERVER").unwrap_or_else(|_| "localhost,1433".into())
+        }
+        HarnessBackend::Sqlite => sqlite_fixture_path().to_string_lossy().into_owned(),
+    };
 
-    let cfg = [
-        ("DRIVER", "ODBC Driver 17 for SQL Server"),
-        ("SERVER", server.as_str()),
-        ("DATABASE", TEST_DB_NAME),
-        ("SCHEMA", "dbo"),
-        ("USER", user.as_str()),
-        ("PASSWORD", pass.as_str()),
-        ("TRUSTED_CONNECTION", "no"),
-        ("ENCRYPT", "no"),
-        ("TRUST_SERVER_CERTIFICATE", "yes"),
-        ("NETWORK", ""),
-        ("RECNUM_COLUMN", "MDS_RECNUM"),
-    ];
-    for (k, v) in cfg {
+    let cfg_owned: Vec<(&'static str, String)> = match current_backend() {
+        HarnessBackend::Mssql => {
+            let user = std::env::var("BTR_TEST_USER").unwrap_or_else(|_| "sa".into());
+            let pass = std::env::var("BTR_TEST_PASS").unwrap_or_else(|_| "WxTest!2024".into());
+            vec![
+                ("BACKEND", "mssql".to_string()),
+                ("DRIVER", "ODBC Driver 17 for SQL Server".to_string()),
+                ("SERVER", server.clone()),
+                ("DATABASE", TEST_DB_NAME.to_string()),
+                ("SCHEMA", "dbo".to_string()),
+                ("USER", user),
+                ("PASSWORD", pass),
+                ("TRUSTED_CONNECTION", "no".to_string()),
+                ("ENCRYPT", "no".to_string()),
+                ("TRUST_SERVER_CERTIFICATE", "yes".to_string()),
+                ("NETWORK", "".to_string()),
+                ("RECNUM_COLUMN", "MDS_RECNUM".to_string()),
+            ]
+        }
+        HarnessBackend::Sqlite => {
+            // SQLite has no logical database namespace — DATABASE is the
+            // .sqlite file path; we keep the [config] DATABASE empty so
+            // the table-lookup path doesn't try to scope by db, and stash
+            // the path in PATH for the connection layer to find via state.
+            vec![
+                ("BACKEND", "sqlite".to_string()),
+                ("DATABASE", server.clone()),
+                ("RECNUM_COLUMN", "MDS_RECNUM".to_string()),
+            ]
+        }
+    };
+    for (k, v) in cfg_owned {
         conn.execute(
             "INSERT INTO config (section, key, value) VALUES ('config', ?1, ?2)",
             params![k, v],
@@ -415,10 +475,29 @@ fn add_test_desc(conn: &Connection, server: &str) {
     insert_index(conn, id, 1, &[(1, true)]);
 }
 
-/// Combined reset: (1) drop+recreate SQL DB, (2) build wxbtrv.db, (3) install
-/// it into wxbtrv-core's state. Returns the wxbtrv.db path.
+/// Reset the SQLite fixture: drop + recreate the per-process .sqlite file
+/// from `fixtures/schema_sqlite.sql`. Idempotent.
+pub fn reset_sqlite_fixture() {
+    // Drop any cached connection so a previous test's open file handle
+    // doesn't pin the schema.
+    wxbtrv_core::sql::reset_connection();
+    let path = sqlite_fixture_path();
+    let _ = std::fs::remove_file(&path);
+    let conn = Connection::open(&path).expect("open sqlite fixture");
+    let sql = std::fs::read_to_string(schema_sqlite_path())
+        .expect("failed to read fixtures/schema_sqlite.sql");
+    conn.execute_batch(&sql).expect("apply sqlite fixture");
+    drop(conn);
+}
+
+/// Combined reset: (1) drop+recreate the backend-specific fixture,
+/// (2) build wxbtrv.db, (3) install it into wxbtrv-core's state.
+/// Returns the wxbtrv.db path.
 pub fn reset_fixture() -> PathBuf {
-    reset_sql_fixture();
+    match current_backend() {
+        HarnessBackend::Mssql => reset_sql_fixture(),
+        HarnessBackend::Sqlite => reset_sqlite_fixture(),
+    }
     let db = build_fixture_wxbtrv_db();
     install_fixture_config(&db);
     db

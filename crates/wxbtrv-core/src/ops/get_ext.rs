@@ -131,22 +131,14 @@ fn fetch_one_extended(
     let cols = meta.select_with_recnum();
     let mut params: Vec<SqlValue> = Vec::new();
     let base_where = if let (false, Some(rn)) = (last_keys.is_empty(), last_rn) {
-        let key_cols: Vec<(String, String, bool)> = col_refs
+        let key_cols: Vec<(String, SqlValue, bool)> = col_refs
             .iter()
             .zip(last_keys)
             .zip(last_desc.iter().copied().chain(std::iter::repeat(false)))
-            .map(|((cr, val), d)| {
-                params.push(val);
-                (cr.0.clone(), dialect.param_marker(params.len()), d)
-            })
+            .map(|((cr, val), d)| (cr.0.clone(), val, d))
             .collect();
-        params.push(SqlValue::I64(rn));
-        let last_rn_marker = dialect.param_marker(params.len());
         Some(build_continuation_where_marker(
-            &key_cols,
-            dir,
-            &last_rn_marker,
-            &rc,
+            &key_cols, dir, rn, &rc, &mut params,
         ))
     } else {
         None

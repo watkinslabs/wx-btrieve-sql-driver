@@ -182,6 +182,14 @@ impl TableMeta {
 
     pub fn table_ref(&self, db_override: &str, schema_override: &str) -> String {
         let d = crate::dialect::active();
+        let backend = state().lock().map(|s| s.backend).unwrap_or_default();
+        let t = d.quote_ident(&self.table_name);
+
+        // SQLite has neither catalog nor schema — emit just the bare name.
+        if backend == Backend::Sqlite {
+            return t;
+        }
+
         let db = if db_override.is_empty() {
             self.db_name.as_str()
         } else {
@@ -204,7 +212,6 @@ impl TableMeta {
             &resolved
         };
 
-        let t = d.quote_ident(&self.table_name);
         match (db.is_empty(), sc.is_empty()) {
             (true, true) => t,
             (true, false) => format!("{}.{}", d.quote_ident(sc), t),

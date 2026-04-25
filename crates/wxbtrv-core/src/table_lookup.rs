@@ -19,9 +19,18 @@ pub fn get_table_meta_for_path(name: &str, path: &str) -> Option<TableMeta> {
         return None;
     }
 
-    // Resolve database: directory config first, then global fallback
+    // SQLite has no logical-database namespace — there's a single .sqlite
+    // file per session, so always do the plain (un-scoped) name lookup.
+    let backend = state().lock().map(|s| s.backend).ok();
+    let bypass_db = matches!(backend, Some(crate::state::Backend::Sqlite));
+
+    // Resolve database scope: directory config first, then global fallback.
     let dir = crate::state::dir_from_path(path);
-    let db = crate::state::resolve_config(&dir, "DATABASE").to_ascii_uppercase();
+    let db = if bypass_db {
+        String::new()
+    } else {
+        crate::state::resolve_config(&dir, "DATABASE").to_ascii_uppercase()
+    };
 
     let Ok(st) = state().lock() else { return None };
 
@@ -40,7 +49,7 @@ pub fn get_table_meta_for_path(name: &str, path: &str) -> Option<TableMeta> {
         return None;
     }
 
-    // No database resolved at all (empty config) — plain lookup as last resort
+    // No database resolved (or single-namespace backend) — plain lookup.
     if let Some(m) = st.tables.get(&k) {
         return Some(m.clone());
     }

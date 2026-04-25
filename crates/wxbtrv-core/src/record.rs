@@ -404,20 +404,18 @@ pub fn unpack_row_typed(fields: &[IntField], record: &[u8]) -> Vec<(String, crat
             let slice = field_slice(record, f.offset, f.length, &f.name);
             let v: SqlValue = match f.native_type {
                 TYPE_STRING => {
-                    let s: String = slice
-                        .iter()
-                        .map(|&b| b as char)
-                        .collect::<String>()
-                        .trim_end()
-                        .to_string();
+                    // Preserve trailing spaces so the stored TEXT in SQLite
+                    // matches the padded record bytes exactly. MSSQL CHAR
+                    // pads on either side so retaining padding is safe.
+                    let s: String = slice.iter().map(|&b| b as char).collect();
                     SqlValue::Text(s)
                 }
                 TYPE_ZSTRING => {
+                    // ZSTRING is null-terminated; everything before the
+                    // first 0 byte is the value. No trim — SQLite is exact
+                    // and the producer never emits trailing spaces here.
                     let end_z = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
-                    let s = String::from_utf8_lossy(&slice[..end_z])
-                        .trim_end()
-                        .to_string();
-                    SqlValue::Text(s)
+                    SqlValue::Text(String::from_utf8_lossy(&slice[..end_z]).into_owned())
                 }
                 TYPE_INT | TYPE_AUTOINC => {
                     let mut le = [0u8; 8];
@@ -563,8 +561,13 @@ pub fn unpack_key_fields(
 
         let val: SqlValue = match f.native_type {
             TYPE_STRING | TYPE_ZSTRING | TYPE_ZSTRING_12 | TYPE_LSTRING => {
+                // Preserve trailing spaces so the bound parameter matches
+                // the padded stored form exactly. SQLite TEXT comparison is
+                // exact; MSSQL CHAR comparison pads on either side so this
+                // works on both. Stop at the first null byte (Z-string
+                // terminator).
                 let data = if f.native_type == TYPE_LSTRING && !slice.is_empty() {
-                    &slice[1..] // skip length byte
+                    &slice[1..]
                 } else {
                     slice
                 };
@@ -572,9 +575,7 @@ pub fn unpack_key_fields(
                     .iter()
                     .take_while(|&&b| b != 0)
                     .map(|&b| b as char)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string();
+                    .collect();
                 SqlValue::Text(s)
             }
             TYPE_INT | TYPE_AUTOINC | TYPE_AUTOINCREMENT => {
@@ -992,11 +993,13 @@ mod tests {
         key.extend_from_slice(&[0x02, 0x01, 0xE0, 0x07]);
         let kf = unpack_key_fields(&fields, &index, &key, true);
         use crate::sql_param::SqlValue;
+        // STRING values keep their trailing-space padding so the bound
+        // parameter matches the stored CHAR/TEXT exactly.
         assert_eq!(
             kf[0],
-            ("GLACCT".into(), Some(SqlValue::Text("10203".into())))
+            ("GLACCT".into(), Some(SqlValue::Text("10203     ".into())))
         );
-        assert_eq!(kf[1], ("GLDPT".into(), Some(SqlValue::Text("GRN".into()))));
+        assert_eq!(kf[1], ("GLDPT".into(), Some(SqlValue::Text("GRN ".into()))));
         assert_eq!(
             kf[2],
             ("DATE".into(), Some(SqlValue::Text("2016-01-02".into())))
