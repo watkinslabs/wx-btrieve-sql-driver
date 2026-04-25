@@ -133,7 +133,7 @@ pub fn do_test_connection(db_path: &Path) -> Result<(), String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
 
     let get = |key: &str| -> String {
-        db::get_config(&conn, "MDS", key)
+        db::get_config(&conn, "config", key)
             .ok()
             .flatten()
             .unwrap_or_default()
@@ -142,6 +142,97 @@ pub fn do_test_connection(db_path: &Path) -> Result<(), String> {
         matches!(get(key).to_ascii_lowercase().as_str(), "yes" | "true" | "1")
     };
 
+    let backend = get("BACKEND");
+    let backend_norm = match backend.trim().to_ascii_lowercase().as_str() {
+        "" | "mssql" | "sqlserver" | "sql_server" | "ms_sql" => "mssql",
+        "postgres" | "postgresql" | "pg" => "postgres",
+        "sqlite" | "sqlite3" => "sqlite",
+        other => return Err(format!("unknown BACKEND in config: {other:?}")),
+    };
+
+    println!("=== Connection config from {} ===", db_path.display());
+    println!("  BACKEND                  = {}", backend_norm);
+
+    if backend_norm == "sqlite" {
+        let path = get("DATABASE");
+        if path.is_empty() {
+            return Err("BACKEND=sqlite requires DATABASE to be set to the .sqlite file path".into());
+        }
+        println!("  DATABASE                 = {}", path);
+        match rusqlite::Connection::open(&path) {
+            Ok(c) => {
+                let _: i64 = c
+                    .query_row("SELECT 1", [], |r| r.get(0))
+                    .map_err(|e| format!("SQLite query failed: {e}"))?;
+                println!("\n✓ SQLite OK ({})", path);
+                return Ok(());
+            }
+            Err(e) => return Err(format!("SQLite open failed: {e}")),
+        }
+    }
+
+    if backend_norm == "postgres" {
+        let server = get("SERVER");
+        let database = get("DATABASE");
+        let user = get("USER");
+        let password = get("PASSWORD");
+        println!(
+            "  SERVER                   = {}",
+            if server.is_empty() {
+                "(not set)"
+            } else {
+                &server
+            }
+        );
+        println!(
+            "  DATABASE                 = {}",
+            if database.is_empty() {
+                "(not set)"
+            } else {
+                &database
+            }
+        );
+        println!(
+            "  USER                     = {}",
+            if user.is_empty() {
+                "(not set)"
+            } else {
+                &user
+            }
+        );
+        let (host, port) = match server.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => {
+                (h.to_string(), Some(p.to_string()))
+            }
+            _ => (server.clone(), None),
+        };
+        let mut parts = vec![format!("host={}", host)];
+        if let Some(p) = port {
+            parts.push(format!("port={}", p));
+        }
+        if !user.is_empty() {
+            parts.push(format!("user={}", user));
+        }
+        if !password.is_empty() {
+            parts.push(format!("password={}", password));
+        }
+        if !database.is_empty() {
+            parts.push(format!("dbname={}", database));
+        }
+        let cs = parts.join(" ");
+        match postgres::Client::connect(&cs, postgres::NoTls) {
+            Ok(mut c) => {
+                let _ = c
+                    .query_one("SELECT 1", &[])
+                    .map_err(|e| format!("Postgres query failed: {e}"))?;
+                println!("\n✓ Postgres OK");
+                return Ok(());
+            }
+            Err(e) => return Err(format!("Postgres connect failed: {e}")),
+        }
+    }
+
+    // MSSQL path (legacy ODBC driver iteration)
     let server = get("SERVER");
     let database = get("DATABASE");
     let driver = get("DRIVER");
@@ -152,7 +243,6 @@ pub fn do_test_connection(db_path: &Path) -> Result<(), String> {
     let encrypt = get_bool("ENCRYPT");
     let trust_cert = get_bool("TRUST_SERVER_CERTIFICATE");
 
-    println!("=== Connection config from {} ===", db_path.display());
     println!(
         "  SERVER                   = {}",
         if server.is_empty() {
@@ -477,6 +567,7 @@ pub fn do_rm_table(db_path: &Path, table: &str) -> Result<(), String> {
 #[allow(clippy::too_many_arguments)]
 pub fn do_set_connection(
     db_path: &Path,
+    backend: Option<&str>,
     server: Option<&str>,
     database: Option<&str>,
     schema: Option<&str>,
@@ -489,7 +580,8 @@ pub fn do_set_connection(
     trust_server_certificate: Option<bool>,
     recnum_column: Option<&str>,
 ) -> Result<(), String> {
-    if server.is_none()
+    if backend.is_none()
+        && server.is_none()
         && database.is_none()
         && schema.is_none()
         && driver.is_none()
@@ -504,9 +596,22 @@ pub fn do_set_connection(
         return Err("at least one connection option required".into());
     }
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
+    // Runtime reads from section 'config'. Earlier code wrote 'MDS'
+    // which sqlite_meta never picked up — the test harness was
+    // writing 'config' directly to compensate.
     let set = |key: &str, val: &str| -> Result<(), String> {
-        db::upsert_config(&conn, "MDS", key, val).map_err(|e| e.to_string())
+        db::upsert_config(&conn, "config", key, val).map_err(|e| e.to_string())
     };
+    if let Some(v) = backend {
+        let normalized = match v.trim().to_ascii_lowercase().as_str() {
+            "mssql" | "sqlserver" | "sql_server" | "ms_sql" => "mssql",
+            "postgres" | "postgresql" | "pg" => "postgres",
+            "sqlite" | "sqlite3" => "sqlite",
+            other => return Err(format!("unknown --backend value: {other:?} (expected mssql, postgres, or sqlite)")),
+        };
+        set("BACKEND", normalized)?;
+        println!("  BACKEND  = {normalized}");
+    }
     if let Some(v) = server {
         set("SERVER", v)?;
         println!("  SERVER   = {v}");

@@ -13,3 +13,4 @@ clap.workspace      = true
 rusqlite.workspace  = true
 thiserror.workspace = true
 odbc-api.workspace  = true
+postgres            = "0.19"

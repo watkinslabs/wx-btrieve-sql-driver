@@ -86,9 +86,16 @@ enum Cmd {
         out: PathBuf,
     },
 
-    /// Set SQL Server connection details (overrides anything from INT files or mds.ini)
+    /// Set connection details (overrides anything from INT files or mds.ini)
     SetConnection {
-        /// SQL Server hostname or IP
+        /// Backend to drive: mssql (default), postgres, or sqlite.
+        /// On sqlite, only --database (path to .sqlite file) is needed.
+        /// On postgres, set --server (host[:port]), --database, --user,
+        /// --password, optional --encrypt and --trust-server-certificate.
+        /// On mssql, set --driver, --server, --database, --user, --password.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Server hostname[:port] (mssql / postgres) — ignored on sqlite
         #[arg(long)]
         server: Option<String>,
         /// Database name (default session database)
@@ -292,6 +299,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Cmd::ExportInt { out, tables } => do_export_int(&cli.db, out, tables),
         Cmd::ExportMds { out } => do_export_mds(&cli.db, out),
         Cmd::SetConnection {
+            backend,
             server,
             database,
             schema,
@@ -305,6 +313,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             recnum_column,
         } => do_set_connection(
             &cli.db,
+            backend.as_deref(),
             server.as_deref(),
             database.as_deref(),
             schema.as_deref(),

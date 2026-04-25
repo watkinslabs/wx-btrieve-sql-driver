@@ -590,6 +590,7 @@ dependencies = [
  "btr-types",
  "clap",
  "odbc-api",
+ "postgres",
  "rusqlite",
  "thiserror",
 ]
