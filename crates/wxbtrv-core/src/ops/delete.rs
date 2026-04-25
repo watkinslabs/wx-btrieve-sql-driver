@@ -2,7 +2,8 @@
 
 use super::helpers::{get_lock_prefix, posblk_key, strace};
 use crate::constants::*;
-use crate::sql::{execute_sql, lock_row, unlock_row};
+use crate::sql::{execute_with, lock_row, unlock_row};
+use crate::sql_param::SqlValue;
 use crate::state::state;
 use core::ffi::c_void;
 
@@ -42,13 +43,15 @@ pub(super) fn op_delete(posblk: *mut c_void) -> i32 {
     let Some(recnum) = last_rn else {
         return BTR_INVALID_POS;
     };
+    let dialect = crate::dialect::active();
     let tref = meta.table_ref("", "");
     let sql = format!(
         "DELETE FROM {} WHERE {} = {}",
         tref,
         meta.recnum_sql_ref(),
-        recnum
+        dialect.param_marker(1)
     );
+    let params = vec![SqlValue::I64(recnum)];
     strace!("op_delete h={} rn={} sql={}", hid, recnum, sql);
     let prefix = match get_lock_prefix(hid) {
         Ok(p) => p,
@@ -57,7 +60,7 @@ pub(super) fn op_delete(posblk: *mut c_void) -> i32 {
     if let Err(e) = lock_row(&prefix, recnum) {
         return e;
     }
-    let rc = match execute_sql(&sql) {
+    let rc = match execute_with(&sql, &params) {
         Ok(_) => BTR_SUCCESS,
         Err(e) => e,
     };

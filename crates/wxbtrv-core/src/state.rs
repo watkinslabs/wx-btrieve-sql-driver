@@ -152,9 +152,10 @@ impl TableMeta {
     }
 
     pub fn select_cols(&self) -> String {
+        let d = crate::dialect::active();
         self.fields
             .iter()
-            .map(|f| format!("[{}]", f.name.replace(']', "]]")))
+            .map(|f| d.quote_ident(&f.name))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -169,16 +170,18 @@ impl TableMeta {
         if self.recnum_is_field() {
             self.select_cols()
         } else {
-            format!("[{}], {}", self.recnum_col, self.select_cols())
+            let d = crate::dialect::active();
+            format!("{}, {}", d.quote_ident(&self.recnum_col), self.select_cols())
         }
     }
 
     /// SQL expression for the row-number column used in WHERE / ORDER BY.
     pub fn recnum_sql_ref(&self) -> String {
-        format!("[{}]", self.recnum_col.replace(']', "]]"))
+        crate::dialect::active().quote_ident(&self.recnum_col)
     }
 
     pub fn table_ref(&self, db_override: &str, schema_override: &str) -> String {
+        let d = crate::dialect::active();
         let db = if db_override.is_empty() {
             self.db_name.as_str()
         } else {
@@ -201,11 +204,12 @@ impl TableMeta {
             &resolved
         };
 
+        let t = d.quote_ident(&self.table_name);
         match (db.is_empty(), sc.is_empty()) {
-            (true, true) => format!("[{}]", self.table_name),
-            (true, false) => format!("[{}].[{}]", sc, self.table_name),
-            (false, true) => format!("[{}].[{}]", db, self.table_name),
-            (false, false) => format!("[{}].[{}].[{}]", db, sc, self.table_name),
+            (true, true) => t,
+            (true, false) => format!("{}.{}", d.quote_ident(sc), t),
+            (false, true) => format!("{}.{}", d.quote_ident(db), t),
+            (false, false) => format!("{}.{}.{}", d.quote_ident(db), d.quote_ident(sc), t),
         }
     }
 }
