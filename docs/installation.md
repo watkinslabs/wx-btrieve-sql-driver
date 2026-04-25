@@ -6,13 +6,39 @@
 - SQL Server reachable from the machine
 - NTVDM enabled (required to run DOS applications)
 
-## Step 1 — Create the install directory
+---
+
+## Recommended: use the installer from a release
+
+Download `wlbtr-installer-vX.Y.Z-windows-i686.exe` from
+[Releases](https://github.com/watkinslabs/wx-btrieve-mssql-driver/releases/latest)
+and run it as Administrator. The installer:
+
+1. Creates `C:\WatkinsX\bin\` if it doesn't exist.
+2. Drops the embedded `wxbtrv.dll` into `C:\Windows\System32\`.
+3. Drops the embedded `wxbtrv.sys`, `db_config.exe`, and `btr-import.exe`
+   into `C:\WatkinsX\bin\`.
+4. Patches `C:\Windows\System32\config.nt`: adds the
+   `DEVICE=C:\WatkinsX\bin\wxbtrv.sys` line and removes any existing
+   `BTRDRVR.SYS` entry.
+
+After the installer runs, skip to **Step 3 — Build the SQLite config
+database** below to wire up SQL Server credentials and import schemas.
+
+The remaining steps in this document describe the manual install path —
+useful when developing wlbtr itself or running a local debug build.
+
+---
+
+## Manual install
+
+### Step 1 — Create the install directory
 
 ```bat
 mkdir C:\WatkinsX\bin
 ```
 
-## Step 2 — Copy files
+### Step 2 — Copy files
 
 Two files need placement in specific directories:
 
@@ -36,7 +62,7 @@ btr-import.exe    ← built from crates/btr-import   (native Windows binary; for
 
 See [Building](building.md) for how to produce these files.
 
-## Step 3 — Build the SQLite config database
+## Step 3 — Build the SQLite config database (both install paths)
 
 Run `db-config.exe` from `C:\WatkinsX\bin\`:
 
@@ -74,7 +100,7 @@ tables regardless of what the INT files say.
 For a standard install leave the database in `C:\WatkinsX\bin\wxbtrv.db` and
 no environment variables are needed.
 
-## Step 4 — Update CONFIG.NT
+### Step 4 — Update CONFIG.NT (manual only)
 
 Edit `C:\Windows\System32\config.nt` as Administrator. Add or replace the
 Btrieve device line:
@@ -94,7 +120,7 @@ files=40
 DEVICE=C:\WatkinsX\bin\wxbtrv.sys
 ```
 
-## Step 5 — Kill NTVDM and test
+## Step 5 — Kill NTVDM and test (both install paths)
 
 ```bat
 taskkill /F /IM ntvdm.exe
@@ -198,17 +224,3 @@ db-config mark-migrated BKGLTRAN --rows 15432 --server 10.0.0.5 --target-db GCan
 db-config clear-migrated BKGLTRAN
 ```
 
----
-
-## Installer (in progress)
-
-Steps 1, 2, and 4 above are being automated by the `installer` crate. It
-will:
-- Create `C:\WatkinsX\bin\`
-- Deploy `wxbtrv.dll` to `C:\Windows\System32\` and `wxbtrv.sys` to
-  `C:\WatkinsX\bin\`
-- Patch `C:\Windows\System32\config.nt`: add the `DEVICE=` line and remove
-  any existing `BTRDRVR.SYS` entry
-- Optionally kill the running `ntvdm.exe` process
-
-Tracked in the [implementation status](architecture.md#implementation-status).

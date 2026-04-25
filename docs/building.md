@@ -93,7 +93,7 @@ cargo test -p btr-test-harness -- --test-threads=1
 crates/
   btr-types/          Shared library: INT file parser, MDS.INI parser,
                       Btrieve type definitions, record codec.
-                      Used by db-config, btr-import, btrv-tracer — NOT by
+                      Used by db-config and btr-import — NOT by
                       wxbtrv-core or the runtime DLL.
 
   wxbtrv-core/        Portable rlib. All op logic, SQL translation, SQLite
@@ -107,40 +107,62 @@ crates/
   btr-import/         CLI for importing .B flat files directly into SQL Server.
   btr-test-harness/   Integration test harness (56 opcode tests against SQL
                       Server). Links wxbtrv-core directly, no DLL needed.
-  btrv-tracer/        Debug/tracing middleman DLL. Drops into a reference
-                      machine in place of w3btrv7.dll and logs every call
-                      while forwarding to the real engine. Used for
-                      differential comparisons only; not in the production path.
-  btr-exerciser/      Test exerciser.
-  installer/          Windows installer (in progress). Automates file
-                      placement, config.nt patching, NTVDM kill.
-  ntvdm-mcp-server/   MCP server deployed on test machines to drive the DOS
-                      app programmatically.
+  installer/          Self-bundling Windows installer. Embeds wxbtrv.dll,
+                      wxbtrv.sys, db_config.exe, and btr-import.exe via
+                      include_bytes! when WXBTRV_DLL / WXBTRV_SYS /
+                      INT_TOOL_EXE / BTR_IMPORT_EXE point at prebuilt
+                      binaries (the release workflow and Makefile both do).
 ```
+
+Internal development tools (proxy DLL for diff runs against a reference
+Pervasive install, differential exerciser, NTVDM-driving MCP server) live
+in a separate sibling repo,
+[`watkinslabs/wlbtr_testing`](https://github.com/watkinslabs/wlbtr_testing),
+and are not required to build or run wlbtr.
+
+---
+
+## Building the installer locally
+
+The simplest path is `make installer`, which sets the payload env vars
+correctly:
+
+```bash
+make dll sys db-config btr-import installer
+# Output: target/i686-pc-windows-gnu/release/installer.exe
+```
+
+If you invoke cargo directly, set the env vars yourself so the build script
+embeds the binaries:
+
+```bash
+WIN=target/i686-pc-windows-gnu/release \
+WXBTRV_DLL="$PWD/$WIN/wxbtrv.dll"     \
+WXBTRV_SYS="$PWD/$WIN/wxbtrv.sys"     \
+INT_TOOL_EXE="$PWD/$WIN/db_config.exe" \
+BTR_IMPORT_EXE="$PWD/$WIN/btr-import.exe" \
+cargo build -p installer --release --target i686-pc-windows-gnu
+```
+
+If those env vars are unset, `cargo build` still succeeds but the resulting
+`installer.exe` is hollow — every "drop file X" step will warn at runtime.
+The build script prints a `cargo:warning=Payload not set ...` line so the
+state is obvious in build output.
 
 ---
 
 ## Debugging
 
-For tracing Btrieve calls on a reference server running the original
-Pervasive stack, build `btrv-tracer` and deploy it as `w3btrv7.dll`
-(renaming the original out of the way):
-
-```bash
-cargo build -p btrv-tracer --target i686-pc-windows-gnu
-```
-
-`btrv-tracer` logs every BTRCALL and proxies to the real vendor DLL. This
-is only useful when comparing our behavior against a known-good Pervasive
-install — it has no role in the production path, where `wxbtrv.dll` replaces
-the vendor stack outright.
-
-Trace output in `wxbtrv` itself is only compiled into debug builds. Release
-builds of `wxbtrv.dll` have all trace calls compiled out via
+Trace output in `wxbtrv` is only compiled into debug builds. Release builds
+of `wxbtrv.dll` have all trace calls compiled out via
 `#[cfg(debug_assertions)]`, so there is no release-mode overhead or log file.
 
 Debug builds of `wxbtrv.dll` log to `C:\WatkinsX\logs\wxbtrv_<timestamp>.log`
 (with fallbacks to `C:\WatkinsX\bin\`, `C:\Windows\Temp\`, or CWD).
+
+The trace level is also runtime-configurable via the `WXBTRV_TRACE_LEVEL`
+environment variable (`off`, `error`, `info`, `debug`) — useful for turning
+verbose logging on in a release build without rebuilding.
 
 ---
 

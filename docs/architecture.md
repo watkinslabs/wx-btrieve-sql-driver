@@ -205,4 +205,4 @@ At DLL startup `wxbtrv-core::sqlite_meta::find_sqlite_db` searches for
 | `db-config` schema import | **Complete** | Multi-dir recursive INT file import, set-connection command |
 | DDL generator | **Partial** | `db-config gen-ddl` emits CREATE TABLE DDL from imported schemas |
 | `.B` flat-file importer (`btr-import`) | **Complete** | Reads Btrieve v5/v6 files, decodes records via INT schema, bulk-inserts into SQL Server |
-| Installer (`installer` crate) | **In progress** | Automates directory creation, PATH update, config.nt patch |
+| Installer (`installer` crate) | **Complete** | Self-bundling Windows installer; embeds DLL + sys + CLIs via `include_bytes!`. Shipped as `wlbtr-installer-vX.Y.Z-windows-i686.exe` in each [release](https://github.com/watkinslabs/wx-btrieve-mssql-driver/releases). |

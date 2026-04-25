@@ -7,6 +7,21 @@ on the target machine.
 
 ---
 
+## Install (end users)
+
+Download the latest release from
+[**Releases**](https://github.com/watkinslabs/wx-btrieve-mssql-driver/releases/latest)
+and run the Windows installer.
+
+| Platform | File | What it contains |
+|---|---|---|
+| Windows i686 (32-bit) | `wlbtr-installer-vX.Y.Z-windows-i686.exe` | Self-contained installer that drops `wxbtrv.dll`, `wxbtrv.sys`, `db_config.exe`, and `btr-import.exe` into place and patches `config.nt`. |
+| Linux x86_64 | `wlbtr-tools-vX.Y.Z-linux-x86_64.tar.gz` | `db-config` and `btr-import` for managing `wxbtrv.db` from a Linux dev box. There is no Linux runtime — the runtime is the Windows DLL. |
+
+Detailed walkthrough: [Installation](docs/installation.md).
+
+---
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — call chain, crate layout, implementation status
@@ -16,7 +31,7 @@ on the target machine.
 
 ---
 
-## Components at a glance
+## Components
 
 | Component | Crate | Role |
 |---|---|---|
@@ -25,6 +40,7 @@ on the target machine.
 | `wxbtrv.db` | — | SQLite database holding SQL Server credentials, per-directory config, and every table schema. Read at startup by the DLL; populated once via `db-config`. |
 | `db-config` | `db-config` | CLI for building and managing `wxbtrv.db`: set connection, import legacy `.INT` files, inspect schemas. |
 | `btr-import` | `btr-import` | CLI for migrating legacy Btrieve `.B` flat files into SQL Server in one pass. |
+| `installer` | `installer` | Self-bundling Windows installer that ships in the release. |
 | `btr-test-harness` | `btr-test-harness` | Host-native integration test suite. 56 tests, one per opcode, running against a real SQL Server. |
 
 ---
@@ -42,3 +58,14 @@ cargo build -p wxbtrv --release --target i686-pc-windows-gnu
 bash scripts/test-setup.sh
 cargo test -p btr-test-harness -- --test-threads=1
 ```
+
+Cutting a release: trigger the `Release` workflow from the GitHub Actions
+tab. It bumps the workspace version, builds everything, tags, and publishes
+the two-file release described above. See
+[`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+---
+
+## License
+
+TBD.

@@ -5,6 +5,11 @@ exercises every Btrieve opcode against a real SQL Server instance. Tests run
 on any host (Linux, macOS, Windows) — the harness depends on `wxbtrv-core` as
 an rlib and calls `btrcall_internal` directly, no DLL loading required.
 
+The same suite runs on every push as part of CI
+([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on an
+`ubuntu-22.04` runner with `msodbcsql17` and a
+`mcr.microsoft.com/mssql/server:2022-latest` service container.
+
 ## Prerequisites
 
 - `cargo` (stable toolchain)
