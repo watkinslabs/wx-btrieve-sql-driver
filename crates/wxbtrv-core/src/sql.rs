@@ -162,18 +162,19 @@ fn build_postgres_conn_str(st: &crate::state::DriverState) -> String {
     if !st.database.is_empty() {
         parts.push(format!("dbname={}", st.database));
     }
-    if st.encrypt || st.trust_server_certificate {
-        // require: TLS required, server cert validated.
-        // require: TLS required, no validation. The postgres crate ties
-        // sslmode to whether a TlsConnector is supplied; we pass the hint
-        // through and let the connection step bail if a non-default mode
-        // is needed without a TLS configurator.
+    // sslmode mirrors the encrypt + trust knobs:
+    //   encrypt=no                    → sslmode=disable (no TlsConnector)
+    //   encrypt=yes, trust_cert=no    → sslmode=verify-full (validates cert)
+    //   encrypt=yes, trust_cert=yes   → sslmode=require (no validation)
+    if st.encrypt {
         let mode = if st.trust_server_certificate {
             "require"
         } else {
             "verify-full"
         };
         parts.push(format!("sslmode={}", mode));
+    } else {
+        parts.push("sslmode=disable".to_string());
     }
     parts.join(" ")
 }
@@ -201,15 +202,44 @@ fn connect_mssql() -> Result<SqlConn, i32> {
 }
 
 fn connect_postgres() -> Result<SqlConn, i32> {
-    let cs = {
+    let (cs, encrypt, accept_invalid_certs) = {
         let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-        build_postgres_conn_str(&st)
+        (
+            build_postgres_conn_str(&st),
+            st.encrypt,
+            st.trust_server_certificate,
+        )
     };
     let display = redact_password(&cs);
-    trace(&format!("sql/postgres: connecting — conn_str={}", display));
-    // No TLS configurator wired yet; sslmode=disable/require with no verify.
-    // Step 4 (Postgres backend) will plug native-tls or rustls in here.
-    match postgres::Client::connect(&cs, postgres::NoTls) {
+    trace(&format!(
+        "sql/postgres: connecting tls={} trust_cert={} — conn_str={}",
+        encrypt, accept_invalid_certs, display
+    ));
+
+    // [MDS] ENCRYPT=yes turns on TLS; TRUST_SERVER_CERTIFICATE=yes skips
+    // hostname / cert validation (matches the MSSQL knob semantics so
+    // operators don't have to learn two different vocabularies).
+    let result = if encrypt {
+        let mut builder = native_tls::TlsConnector::builder();
+        if accept_invalid_certs {
+            builder
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+        let connector = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                trace(&format!("sql/postgres: TLS connector build failed: {e}"));
+                return Err(set_err(ERR_CONTEXT_SETUP));
+            }
+        };
+        let tls = postgres_native_tls::MakeTlsConnector::new(connector);
+        postgres::Client::connect(&cs, tls)
+    } else {
+        postgres::Client::connect(&cs, postgres::NoTls)
+    };
+
+    match result {
         Ok(client) => {
             trace("sql/postgres: connected OK");
             Ok(SqlConn::Postgres(client))
