@@ -253,11 +253,49 @@ pub struct HandleEntry {
     pub owner_name: Option<String>,
 }
 
+// ── Backend selection ────────────────────────────────────────────────────────
+
+/// Database backend the runtime targets. Picked from `wxbtrv.db` at startup
+/// via the `[MDS] BACKEND=` key (defaults to MSSQL for back-compat).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    #[default]
+    Mssql,
+    Postgres,
+    Sqlite,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mssql" | "sqlserver" | "sql_server" | "ms_sql" | "" => Some(Backend::Mssql),
+            "postgres" | "postgresql" | "pg" => Some(Backend::Postgres),
+            "sqlite" | "sqlite3" => Some(Backend::Sqlite),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backend::Mssql => "mssql",
+            Backend::Postgres => "postgres",
+            Backend::Sqlite => "sqlite",
+        }
+    }
+}
+
 // ── Driver state ──────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 pub struct DriverState {
-    // Connection info (from wxbtrv.db [config] section — global defaults)
+    // Backend selection (read from [MDS] BACKEND= in wxbtrv.db)
+    pub backend: Backend,
+
+    // Connection info (from wxbtrv.db [config] section — global defaults).
+    // Field meaning depends on `backend`:
+    //   Mssql:    server/database/driver/network/user/pass + tls flags + dsn
+    //   Postgres: server (host:port) / database / user / pass + tls flags
+    //   Sqlite:   `database` is the path to the .sqlite file; everything else ignored
     pub server: String,
     pub dsn: String,
     pub driver: String,  // ODBC driver name, e.g. "SQL Server Native Client 10.0"

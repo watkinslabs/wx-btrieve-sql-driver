@@ -176,6 +176,14 @@ fn load_connection_from_sqlite(conn: &Connection) {
     };
 
     let Ok(mut st) = state().lock() else { return };
+    let backend_raw = get("BACKEND");
+    st.backend = crate::state::Backend::parse(&backend_raw).unwrap_or_else(|| {
+        crate::trace::trace(&format!(
+            "sqlite_meta: unknown BACKEND={:?}, falling back to mssql",
+            backend_raw
+        ));
+        crate::state::Backend::default()
+    });
     st.server = get("SERVER");
     st.database = get("DATABASE");
     st.schema = get("SCHEMA");

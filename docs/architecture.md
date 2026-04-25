@@ -22,10 +22,6 @@ wxbtrv.dll              ← our 32-bit Rust DLL: NTVDM VDD + Btrieve engine
 SQL Server              ← via ODBC
 ```
 
-Three vendor pieces that were in the original path are gone:
-`BTRDRVR.SYS`, `BTRVDD.DLL`, and `w3btrv7.dll`. `wxbtrv.sys` and `wxbtrv.dll`
-together cover their job.
-
 ## Crates
 
 The runtime splits in two so the op logic can be unit-tested without a

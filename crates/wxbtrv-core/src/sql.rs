@@ -1,5 +1,5 @@
 use crate::constants::{BTR_RECORD_LOCKED, ERR_CONTEXT_FAILURE, ERR_CONTEXT_SETUP, ERR_NOT_LOADED};
-use crate::state::{set_err, state};
+use crate::state::{set_err, state, Backend};
 use crate::trace::{get_seq, trace};
 
 macro_rules! strace {
@@ -7,44 +7,40 @@ macro_rules! strace {
         trace(&format!("#{}   {}", get_seq(), format!($($arg)*)))
     };
 }
-use odbc_api::{Connection, ConnectionOptions, Cursor, Environment, ResultSetMetadata};
+
+use odbc_api::{Connection as OdbcConn, ConnectionOptions, Cursor, Environment, ResultSetMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Global flag: there is an active SQL Server transaction on the shared
-/// connection. Set by begin_txn(), cleared by commit_txn()/abort_txn().
-/// Exposed so op_reset and friends can observe / rollback if needed.
+/// Global flag: there is an active transaction on the shared connection.
+/// Set by begin_txn(), cleared by commit_txn()/abort_txn().
 pub static TXN_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// ── Persistent ODBC environment + connection ──────────────────────────────────
+// ── Backend-flexible connection holder ───────────────────────────────────────
 //
-// Environment is Send+Sync (odbc_api marks it so).  We create it once and keep
-// it for the lifetime of the process.  Connection<'static> borrows &'static Env.
-// Connection is Send but not Sync, so we wrap it in a Mutex.
-//
-// Having one connection per process means:
-//   • All BTRCALL ops share a SQL Server session → SCOPE_IDENTITY(), @@SPID, and
-//     future sp_getapplock calls all work correctly.
-//   • Connection overhead (TCP handshake + auth) is paid once, not per BTRCALL.
-//   • Multiple threads serialize on the mutex — acceptable because Btrieve itself
-//     is fundamentally single-threaded per position-block.
+// Each variant owns the native driver's connection type for that backend.
+// One connection per process, behind a Mutex — Btrieve is fundamentally
+// single-threaded per position-block, so serializing is fine.
+
+enum SqlConn {
+    Mssql(OdbcConn<'static>),
+    Postgres(postgres::Client),
+    Sqlite(rusqlite::Connection),
+}
 
 static ODBC_ENV: OnceLock<Environment> = OnceLock::new();
-static CONN: OnceLock<Mutex<Option<Connection<'static>>>> = OnceLock::new();
+static CONN: OnceLock<Mutex<Option<SqlConn>>> = OnceLock::new();
 
 fn odbc_env() -> Result<&'static Environment, i32> {
-    // Try to initialize the ODBC environment if it hasn't been yet.
-    // If the driver manager is unavailable (e.g. unixODBC / msodbcsql not installed),
-    // we must return an error — never panic, because this code runs inside NTVDM
-    // and a panic would take the whole DOS process down with an illegal-instruction trap.
+    // Lazy-init the ODBC environment. Don't panic if the driver manager is
+    // missing — we run inside NTVDM and a panic would crash the DOS app.
     if ODBC_ENV.get().is_none() {
         match Environment::new() {
             Ok(env) => {
-                // Ignore the Err from set — another thread may have raced us.
                 let _ = ODBC_ENV.set(env);
             }
             Err(e) => {
-                crate::trace::trace(&format!(
+                trace(&format!(
                     "odbc_env: Environment::new() failed: {e:?} — ODBC driver manager unavailable"
                 ));
                 return Err(set_err(ERR_NOT_LOADED));
@@ -54,12 +50,12 @@ fn odbc_env() -> Result<&'static Environment, i32> {
     ODBC_ENV.get().ok_or_else(|| set_err(ERR_NOT_LOADED))
 }
 
-fn conn_cell() -> &'static Mutex<Option<Connection<'static>>> {
+fn conn_cell() -> &'static Mutex<Option<SqlConn>> {
     CONN.get_or_init(|| Mutex::new(None))
 }
 
-/// Drop the cached connection so the next call re-connects.
-/// Call this when server/database/credentials change (MDS.INI reload, op_stop).
+/// Drop the cached connection so the next call re-connects. Called when
+/// server/database/credentials change (e.g. MDS.INI reload, op_stop).
 pub fn reset_connection() {
     if let Ok(mut g) = conn_cell().lock() {
         *g = None;
@@ -67,21 +63,21 @@ pub fn reset_connection() {
 }
 
 fn redact_password(cs: &str) -> String {
-    // Replace Pwd=<value>; with Pwd=***; for safe logging
     let mut out = String::with_capacity(cs.len());
     let lower = cs.to_ascii_lowercase();
     let mut i = 0;
     while i < cs.len() {
-        if lower[i..].starts_with("pwd=") {
-            out.push_str("Pwd=***;");
-            // skip past Pwd=<value>;
-            i += 4; // skip "pwd="
+        if lower[i..].starts_with("pwd=") || lower[i..].starts_with("password=") {
+            let key_len = if lower[i..].starts_with("pwd=") { 4 } else { 9 };
+            out.push_str(&cs[i..i + key_len]);
+            out.push_str("***;");
+            i += key_len;
             while i < cs.len() && cs.as_bytes()[i] != b';' {
                 i += 1;
             }
             if i < cs.len() {
                 i += 1;
-            } // skip ';'
+            }
         } else {
             out.push(cs.as_bytes()[i] as char);
             i += 1;
@@ -90,24 +86,20 @@ fn redact_password(cs: &str) -> String {
     out
 }
 
-fn build_conn_str(st: &crate::state::DriverState) -> String {
+// ── Connection-string builders ───────────────────────────────────────────────
+
+fn build_mssql_conn_str(st: &crate::state::DriverState) -> String {
     let mut s = String::new();
 
     if !st.dsn.is_empty() {
         s.push_str(&format!("DSN={};", st.dsn));
     } else {
-        // DRIVER must be set explicitly in wxbtrv.db [MDS] DRIVER=...
         s.push_str(&format!("Driver={{{}}};", st.driver));
-
         let srv = if st.server.is_empty() {
             "localhost"
         } else {
             &st.server
         };
-        // NETWORK controls how the driver connects:
-        //   ""         — driver default (usually Named Pipes for legacy drivers)
-        //   "tcp:"     — prepend tcp: prefix to server (modern drivers)
-        //   "DBMSSOCN" — append Network=DBMSSOCN (legacy TCP/IP for old drivers)
         match st.network.to_ascii_uppercase().as_str() {
             "TCP:" | "TCP" => {
                 let bare = srv.strip_prefix("tcp:").unwrap_or(srv);
@@ -120,7 +112,6 @@ fn build_conn_str(st: &crate::state::DriverState) -> String {
                 s.push_str(&format!("Server={};", srv));
             }
         }
-
         if !st.database.is_empty() {
             s.push_str(&format!("Database={};", st.database));
         }
@@ -146,138 +137,236 @@ fn build_conn_str(st: &crate::state::DriverState) -> String {
     s
 }
 
-/// Execute `f` with a live connection.  If the connection is absent or dead,
-/// reconnect first.  On connection-level errors, drop the connection so the
-/// next call triggers a fresh reconnect.
-fn with_conn<F, T>(f: F) -> Result<T, i32>
-where
-    F: FnOnce(&Connection<'static>) -> Result<T, i32>,
-{
-    let env = odbc_env()?;
-    let mut g = conn_cell().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-
-    // (Re-)connect if needed.
-    if g.is_none() {
-        let cs = {
-            let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-            build_conn_str(&st)
+fn build_postgres_conn_str(st: &crate::state::DriverState) -> String {
+    // postgres crate accepts libpq-style key=value strings.
+    let mut parts: Vec<String> = Vec::new();
+    let (host, port) = match st.server.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
+            (h.to_string(), Some(p.to_string()))
+        }
+        _ => (st.server.clone(), None),
+    };
+    if !host.is_empty() {
+        parts.push(format!("host={}", host));
+    }
+    if let Some(p) = port {
+        parts.push(format!("port={}", p));
+    }
+    if !st.user.is_empty() {
+        parts.push(format!("user={}", st.user));
+    }
+    if !st.pass.is_empty() {
+        parts.push(format!("password={}", st.pass));
+    }
+    if !st.database.is_empty() {
+        parts.push(format!("dbname={}", st.database));
+    }
+    if st.encrypt || st.trust_server_certificate {
+        // require: TLS required, server cert validated.
+        // require: TLS required, no validation. The postgres crate ties
+        // sslmode to whether a TlsConnector is supplied; we pass the hint
+        // through and let the connection step bail if a non-default mode
+        // is needed without a TLS configurator.
+        let mode = if st.trust_server_certificate {
+            "require"
+        } else {
+            "verify-full"
         };
-        let display = redact_password(&cs);
-        trace(&format!(
-            "sql: connecting — driver={:?} network={:?} server={:?}",
-            {
-                let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-                st.driver.clone()
-            },
-            {
-                let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-                st.network.clone()
-            },
-            {
-                let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
-                st.server.clone()
-            }
-        ));
-        trace(&format!("sql: conn_str={}", display));
-        match env.connect_with_connection_string(&cs, ConnectionOptions::default()) {
-            Ok(conn) => {
-                trace("sql: connected OK");
-                *g = Some(conn);
-            }
-            Err(e) => {
-                // Log each ODBC diagnostic record for full error detail
-                trace("sql: CONNECT FAILED");
-                trace(&format!("sql:   conn_str={}", display));
-                trace(&format!("sql:   error={}", e));
-                return Err(set_err(ERR_CONTEXT_SETUP));
-            }
+        parts.push(format!("sslmode={}", mode));
+    }
+    parts.join(" ")
+}
+
+// ── Connection establishment ─────────────────────────────────────────────────
+
+fn connect_mssql() -> Result<SqlConn, i32> {
+    let env = odbc_env()?;
+    let cs = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        build_mssql_conn_str(&st)
+    };
+    let display = redact_password(&cs);
+    trace(&format!("sql/mssql: connecting — conn_str={}", display));
+    match env.connect_with_connection_string(&cs, ConnectionOptions::default()) {
+        Ok(conn) => {
+            trace("sql/mssql: connected OK");
+            Ok(SqlConn::Mssql(conn))
+        }
+        Err(e) => {
+            trace(&format!("sql/mssql: CONNECT FAILED: {e}"));
+            Err(set_err(ERR_CONTEXT_SETUP))
         }
     }
+}
 
-    let res = f(g.as_ref().unwrap());
+fn connect_postgres() -> Result<SqlConn, i32> {
+    let cs = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        build_postgres_conn_str(&st)
+    };
+    let display = redact_password(&cs);
+    trace(&format!("sql/postgres: connecting — conn_str={}", display));
+    // No TLS configurator wired yet; sslmode=disable/require with no verify.
+    // Step 4 (Postgres backend) will plug native-tls or rustls in here.
+    match postgres::Client::connect(&cs, postgres::NoTls) {
+        Ok(client) => {
+            trace("sql/postgres: connected OK");
+            Ok(SqlConn::Postgres(client))
+        }
+        Err(e) => {
+            trace(&format!("sql/postgres: CONNECT FAILED: {e}"));
+            Err(set_err(ERR_CONTEXT_SETUP))
+        }
+    }
+}
 
-    // Drop connection on errors that indicate the session is gone.
+fn connect_sqlite() -> Result<SqlConn, i32> {
+    let path = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        if st.database.is_empty() {
+            ":memory:".to_string()
+        } else {
+            st.database.clone()
+        }
+    };
+    trace(&format!("sql/sqlite: opening {}", path));
+    match rusqlite::Connection::open(&path) {
+        Ok(conn) => {
+            trace("sql/sqlite: opened OK");
+            Ok(SqlConn::Sqlite(conn))
+        }
+        Err(e) => {
+            trace(&format!("sql/sqlite: OPEN FAILED: {e}"));
+            Err(set_err(ERR_CONTEXT_SETUP))
+        }
+    }
+}
+
+fn connect() -> Result<SqlConn, i32> {
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
+    };
+    match backend {
+        Backend::Mssql => connect_mssql(),
+        Backend::Postgres => connect_postgres(),
+        Backend::Sqlite => connect_sqlite(),
+    }
+}
+
+/// Run `f` with a live connection. Reconnects on demand and drops the
+/// cached connection on connection-level errors so the next call retries.
+fn with_conn<F, T>(f: F) -> Result<T, i32>
+where
+    F: FnOnce(&mut SqlConn) -> Result<T, i32>,
+{
+    let mut g = conn_cell().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+    if g.is_none() {
+        *g = Some(connect()?);
+    }
+    let res = f(g.as_mut().unwrap());
     if let Err(e) = &res {
         if *e == ERR_CONTEXT_FAILURE || *e == ERR_CONTEXT_SETUP {
             trace("sql: connection error — will reconnect on next call");
             *g = None;
         }
     }
-
     res
 }
 
 // ── Public SQL helpers ────────────────────────────────────────────────────────
 
-/// Begin a SQL Server transaction on the shared connection.
-///
-/// `isolation` is one of: `READ COMMITTED`, `REPEATABLE READ`, `SERIALIZABLE`,
-/// `SNAPSHOT`, `READ UNCOMMITTED`. For Btrieve op 19 (exclusive) we use
-/// `SERIALIZABLE` (closest to file-level lock); for op 1019 (concurrent)
-/// we use `READ COMMITTED` (page-level semantics).
-///
-/// Returns Err(37 BTR_TXN_ACTIVE) if a txn is already active.
+/// Begin a transaction. `isolation` is honored only on backends that
+/// support per-txn isolation levels (currently MSSQL); other backends use
+/// their default isolation.
 pub fn begin_txn(isolation: &str) -> Result<(), i32> {
     if TXN_ACTIVE.load(Ordering::Acquire) {
         return Err(crate::constants::BTR_TXN_ACTIVE);
     }
-    // Keep the isolation level set narrow: validated against a whitelist so
-    // a stray call can never splice arbitrary SQL.
-    let iso = match isolation.to_ascii_uppercase().as_str() {
-        "READ UNCOMMITTED" => "READ UNCOMMITTED",
-        "READ COMMITTED" => "READ COMMITTED",
-        "REPEATABLE READ" => "REPEATABLE READ",
-        "SERIALIZABLE" => "SERIALIZABLE",
-        "SNAPSHOT" => "SNAPSHOT",
-        _ => "READ COMMITTED",
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
     };
-    let sql = format!(
-        "SET TRANSACTION ISOLATION LEVEL {}; BEGIN TRANSACTION;",
-        iso
-    );
+    let dialect = crate::dialect::for_backend(backend);
+    let sql = match backend {
+        Backend::Mssql => {
+            let iso = match isolation.to_ascii_uppercase().as_str() {
+                "READ UNCOMMITTED" => "READ UNCOMMITTED",
+                "READ COMMITTED" => "READ COMMITTED",
+                "REPEATABLE READ" => "REPEATABLE READ",
+                "SERIALIZABLE" => "SERIALIZABLE",
+                "SNAPSHOT" => "SNAPSHOT",
+                _ => "READ COMMITTED",
+            };
+            format!("SET TRANSACTION ISOLATION LEVEL {iso}; BEGIN TRANSACTION;")
+        }
+        _ => dialect.begin_txn().to_string(),
+    };
     execute_sql(&sql)?;
     TXN_ACTIVE.store(true, Ordering::Release);
-    trace(&format!("sql: BEGIN TRANSACTION iso={}", iso));
+    trace(&format!("sql: BEGIN TRANSACTION ({})", backend.as_str()));
     Ok(())
 }
 
-/// Commit the current transaction. Returns Err(39 BTR_NO_TXN) if none active.
 pub fn commit_txn() -> Result<(), i32> {
     if !TXN_ACTIVE.load(Ordering::Acquire) {
         return Err(crate::constants::BTR_NO_TXN);
     }
-    let rc = execute_sql("COMMIT TRANSACTION;");
-    // Whatever the result, clear the flag so we don't get stuck "active".
+    let dialect = crate::dialect::active();
+    let rc = execute_sql(dialect.commit());
     TXN_ACTIVE.store(false, Ordering::Release);
-    trace("sql: COMMIT TRANSACTION");
+    trace("sql: COMMIT");
     rc
 }
 
-/// Roll back the current transaction. Returns Err(39 BTR_NO_TXN) if none active.
 pub fn abort_txn() -> Result<(), i32> {
     if !TXN_ACTIVE.load(Ordering::Acquire) {
         return Err(crate::constants::BTR_NO_TXN);
     }
-    let rc = execute_sql("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;");
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
+    };
+    let sql = match backend {
+        Backend::Mssql => "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;".to_string(),
+        _ => crate::dialect::for_backend(backend).rollback().to_string(),
+    };
+    let rc = execute_sql(&sql);
     TXN_ACTIVE.store(false, Ordering::Release);
-    trace("sql: ROLLBACK TRANSACTION");
+    trace("sql: ROLLBACK");
     rc
 }
 
-/// Execute a non-query SQL statement (INSERT / UPDATE / DELETE / DDL).
+/// Execute a non-query statement (INSERT / UPDATE / DELETE / DDL).
 pub fn execute_sql(sql: &str) -> Result<(), i32> {
-    with_conn(|conn| {
-        conn.execute(sql, ()).map(|_| ()).map_err(|e| {
-            crate::trace::trace(&format!("execute_sql ERROR: {}", e));
+    with_conn(|conn| match conn {
+        SqlConn::Mssql(c) => c.execute(sql, ()).map(|_| ()).map_err(|e| {
+            trace(&format!("execute_sql/mssql ERROR: {e}"));
             set_err(ERR_CONTEXT_FAILURE)
-        })
+        }),
+        SqlConn::Postgres(c) => c.batch_execute(sql).map_err(|e| {
+            trace(&format!("execute_sql/postgres ERROR: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        }),
+        SqlConn::Sqlite(c) => c.execute_batch(sql).map_err(|e| {
+            trace(&format!("execute_sql/sqlite ERROR: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        }),
     })
 }
 
-/// Resolve the "{DB_ID}.{TABLE_ID}" prefix for a table's lock resources.
-/// Matches the format used by _adv_row_lock so all DLL instances coordinate.
-/// Cached in HandleEntry.lock_prefix after first call.
+/// Acquire an exclusive row-level advisory lock on MSSQL via sp_getapplock.
+/// Postgres equivalent (`pg_advisory_lock`) and SQLite no-op are wired in
+/// step 4/5 of the multi-backend rollout.
 pub fn resolve_lock_prefix(db: &str, schema: &str, table: &str) -> Result<String, i32> {
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
+    };
+    if backend != Backend::Mssql {
+        // Non-MSSQL backends use a simpler lock-key scheme TBD.
+        return Ok(format!("{}.{}.{}", db, schema, table));
+    }
     let fq = format!("{}.{}.{}", db, schema, table);
     let sql = format!(
         "SELECT CAST(DB_ID(N'{}') AS VARCHAR(10)) + '.' + CAST(OBJECT_ID(N'{}') AS VARCHAR(20))",
@@ -292,131 +381,327 @@ pub fn resolve_lock_prefix(db: &str, schema: &str, table: &str) -> Result<String
         .ok_or_else(|| set_err(ERR_CONTEXT_SETUP))
 }
 
-/// Acquire an exclusive row-level advisory lock via sp_getapplock (Session mode).
-/// Resource key: "{DB_ID}.{TABLE_ID}.{row_id}" — matches _adv_row_lock SP format
-/// so all DLL instances on different servers coordinate on the same SQL Server.
-/// Session-mode: lock persists until unlock_row() or connection drop.
-/// Returns Err(BTR_RECORD_LOCKED) if already locked by another session.
 pub fn lock_row(lock_prefix: &str, row_id: i64) -> Result<(), i32> {
-    let resource = format!("{}.{}", lock_prefix, row_id);
-    let sql = format!(
-        "DECLARE @r INT; \
-         EXEC @r = sp_getapplock @Resource=N'{}', @LockMode=N'Exclusive', @LockOwner=N'Session', @LockTimeout=0; \
-         IF @r < 0 RAISERROR('Row locked by another session',16,1);",
-        resource.replace('\'', "''")
-    );
-    with_conn(|conn| {
-        conn.execute(&sql, ())
-            .map(|_| ())
-            .map_err(|_| set_err(BTR_RECORD_LOCKED))
-    })
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
+    };
+    match backend {
+        Backend::Mssql => {
+            let resource = format!("{}.{}", lock_prefix, row_id);
+            let sql = format!(
+                "DECLARE @r INT; \
+                 EXEC @r = sp_getapplock @Resource=N'{}', @LockMode=N'Exclusive', @LockOwner=N'Session', @LockTimeout=0; \
+                 IF @r < 0 RAISERROR('Row locked by another session',16,1);",
+                resource.replace('\'', "''")
+            );
+            with_conn(|conn| match conn {
+                SqlConn::Mssql(c) => c
+                    .execute(&sql, ())
+                    .map(|_| ())
+                    .map_err(|_| set_err(BTR_RECORD_LOCKED)),
+                _ => unreachable!("backend mismatch"),
+            })
+        }
+        Backend::Postgres => {
+            // pg_advisory_lock takes a bigint; hash the resource into one.
+            let key = stable_lock_key(lock_prefix, row_id);
+            let sql = format!("SELECT pg_advisory_lock({key})");
+            with_conn(|conn| match conn {
+                SqlConn::Postgres(c) => c
+                    .batch_execute(&sql)
+                    .map_err(|_| set_err(BTR_RECORD_LOCKED)),
+                _ => unreachable!(),
+            })
+        }
+        Backend::Sqlite => Ok(()), // SQLite is single-writer; no advisory locks.
+    }
 }
 
-/// Release the row-level advisory lock acquired by lock_row().
 pub fn unlock_row(lock_prefix: &str, row_id: i64) -> Result<(), i32> {
-    let resource = format!("{}.{}", lock_prefix, row_id);
-    let sql = format!(
-        "EXEC sp_releaseapplock @Resource=N'{}', @LockOwner=N'Session';",
-        resource.replace('\'', "''")
-    );
-    with_conn(|conn| {
-        conn.execute(&sql, ())
-            .map(|_| ())
-            .map_err(|_| set_err(ERR_CONTEXT_FAILURE))
-    })
+    let backend = {
+        let st = state().lock().map_err(|_| set_err(ERR_CONTEXT_SETUP))?;
+        st.backend
+    };
+    match backend {
+        Backend::Mssql => {
+            let resource = format!("{}.{}", lock_prefix, row_id);
+            let sql = format!(
+                "EXEC sp_releaseapplock @Resource=N'{}', @LockOwner=N'Session';",
+                resource.replace('\'', "''")
+            );
+            with_conn(|conn| match conn {
+                SqlConn::Mssql(c) => c
+                    .execute(&sql, ())
+                    .map(|_| ())
+                    .map_err(|_| set_err(ERR_CONTEXT_FAILURE)),
+                _ => unreachable!(),
+            })
+        }
+        Backend::Postgres => {
+            let key = stable_lock_key(lock_prefix, row_id);
+            let sql = format!("SELECT pg_advisory_unlock({key})");
+            with_conn(|conn| match conn {
+                SqlConn::Postgres(c) => c
+                    .batch_execute(&sql)
+                    .map_err(|_| set_err(ERR_CONTEXT_FAILURE)),
+                _ => unreachable!(),
+            })
+        }
+        Backend::Sqlite => Ok(()),
+    }
 }
 
-/// Fetch up to `limit` rows from `sql`, each row as a `Vec<String>` aligned
-/// to the SELECT column list.
+fn stable_lock_key(prefix: &str, row_id: i64) -> i64 {
+    // FNV-1a over (prefix, row_id) → i64.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in prefix.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for b in row_id.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h as i64
+}
+
+/// Fetch up to `limit` rows from `sql`, each row as `Vec<String>` aligned to
+/// the SELECT column list. The single canonical query helper.
 pub fn fetch_rows_positional(
     sql: &str,
     n_cols: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, i32> {
     trace(&format!("fetch_rows_positional sql={}", sql));
-    with_conn(|conn| {
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        match conn.execute(sql, ()) {
-            Err(e) => {
-                trace(&format!("sql execute error: {}", e));
-                return Err(set_err(ERR_CONTEXT_FAILURE));
-            }
-            Ok(None) => {} // no result set (e.g. plain INSERT/UPDATE/DELETE)
-            Ok(Some(mut cursor)) => {
-                while rows.len() < limit {
-                    let next = cursor.next_row().map_err(|e| {
-                        trace(&format!("sql next_row error: {}", e));
-                        set_err(ERR_CONTEXT_FAILURE)
-                    })?;
-                    let Some(mut r) = next else { break };
-                    let mut row = Vec::with_capacity(n_cols);
-                    for col in 1..=(n_cols as u16) {
-                        let mut v: Vec<u8> = Vec::new();
-                        let has = r.get_text(col, &mut v).unwrap_or(false);
-                        row.push(if has {
-                            String::from_utf8_lossy(&v).into_owned()
-                        } else {
-                            String::new()
-                        });
-                    }
-                    rows.push(row);
-                }
-            }
-        }
-        Ok(rows)
+    with_conn(|conn| match conn {
+        SqlConn::Mssql(c) => fetch_mssql(c, sql, n_cols, limit),
+        SqlConn::Postgres(c) => fetch_postgres(c, sql, n_cols, limit),
+        SqlConn::Sqlite(c) => fetch_sqlite(c, sql, n_cols, limit),
     })
 }
 
-/// Convenience: fetch a single row or return Err(4) = Btrieve KEY_NOT_FOUND.
+fn fetch_mssql(
+    c: &mut OdbcConn<'static>,
+    sql: &str,
+    n_cols: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, i32> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    match c.execute(sql, ()) {
+        Err(e) => {
+            trace(&format!("fetch/mssql execute error: {e}"));
+            return Err(set_err(ERR_CONTEXT_FAILURE));
+        }
+        Ok(None) => {} // non-query
+        Ok(Some(mut cursor)) => {
+            while rows.len() < limit {
+                let next = cursor.next_row().map_err(|e| {
+                    trace(&format!("fetch/mssql next_row error: {e}"));
+                    set_err(ERR_CONTEXT_FAILURE)
+                })?;
+                let Some(mut r) = next else { break };
+                let mut row = Vec::with_capacity(n_cols);
+                for col in 1..=(n_cols as u16) {
+                    let mut v: Vec<u8> = Vec::new();
+                    let has = r.get_text(col, &mut v).unwrap_or(false);
+                    row.push(if has {
+                        String::from_utf8_lossy(&v).into_owned()
+                    } else {
+                        String::new()
+                    });
+                }
+                rows.push(row);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn fetch_postgres(
+    c: &mut postgres::Client,
+    sql: &str,
+    n_cols: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, i32> {
+    let pg_rows = c.query(sql, &[]).map_err(|e| {
+        trace(&format!("fetch/postgres query error: {e}"));
+        set_err(ERR_CONTEXT_FAILURE)
+    })?;
+    let mut rows = Vec::with_capacity(pg_rows.len().min(limit));
+    for r in pg_rows.into_iter().take(limit) {
+        let mut row = Vec::with_capacity(n_cols);
+        for col in 0..n_cols {
+            // Render each column as text. postgres-types provides a generic
+            // FromSql for &str on text-castable types; for everything else
+            // we fall through to the column's textual representation.
+            let v: Option<String> = r
+                .try_get::<_, Option<String>>(col)
+                .or_else(|_| r.try_get::<_, Option<&str>>(col).map(|o| o.map(String::from)))
+                .unwrap_or_else(|_| Some(format!("{:?}", r.columns().get(col))));
+            row.push(v.unwrap_or_default());
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn fetch_sqlite(
+    c: &rusqlite::Connection,
+    sql: &str,
+    n_cols: usize,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, i32> {
+    let mut stmt = c.prepare(sql).map_err(|e| {
+        trace(&format!("fetch/sqlite prepare error: {e}"));
+        set_err(ERR_CONTEXT_FAILURE)
+    })?;
+    let mut sql_rows = stmt.query([]).map_err(|e| {
+        trace(&format!("fetch/sqlite query error: {e}"));
+        set_err(ERR_CONTEXT_FAILURE)
+    })?;
+    let mut rows = Vec::new();
+    while rows.len() < limit {
+        let next = sql_rows.next().map_err(|e| {
+            trace(&format!("fetch/sqlite next error: {e}"));
+            set_err(ERR_CONTEXT_FAILURE)
+        })?;
+        let Some(r) = next else { break };
+        let mut row = Vec::with_capacity(n_cols);
+        for col in 0..n_cols {
+            let v: rusqlite::types::Value = r.get(col).unwrap_or(rusqlite::types::Value::Null);
+            row.push(match v {
+                rusqlite::types::Value::Null => String::new(),
+                rusqlite::types::Value::Integer(i) => i.to_string(),
+                rusqlite::types::Value::Real(f) => f.to_string(),
+                rusqlite::types::Value::Text(s) => s,
+                rusqlite::types::Value::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
+            });
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// Convenience: fetch a single row or return KEY_NOT_FOUND.
 pub fn fetch_one_row(sql: &str, n_cols: usize) -> Result<Vec<String>, i32> {
     let mut rows = fetch_rows_positional(sql, n_cols, 1)?;
     rows.pop().ok_or(4)
 }
 
-/// Fetch up to `limit` rows, each as a pipe-delimited string of all columns.
-/// Used by the DBU legacy interface.
+/// Fetch up to `limit` rows, each as a pipe-delimited string of all columns
+/// (DBU legacy interface).
 pub fn fetch_rows_text(sql: &str, limit: usize) -> Result<Vec<String>, i32> {
-    with_conn(|conn| {
-        let mut rows = Vec::new();
-        if let Some(mut cursor) = conn
-            .execute(sql, ())
-            .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?
-        {
-            let n_cols = cursor.num_result_cols().unwrap_or(8).max(0) as u16;
-            while rows.len() < limit {
-                let next = cursor
-                    .next_row()
-                    .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
-                let Some(mut r) = next else { break };
-                let mut out = String::new();
-                for col in 1..=n_cols {
-                    let mut v = Vec::new();
-                    let has = r
-                        .get_text(col, &mut v)
-                        .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
-                    if !has {
-                        break;
-                    }
-                    if !out.is_empty() {
-                        out.push('|');
-                    }
-                    out.push_str(String::from_utf8_lossy(&v).as_ref());
-                }
-                rows.push(out);
+    with_conn(|conn| match conn {
+        SqlConn::Mssql(c) => fetch_text_mssql(c, sql, limit),
+        SqlConn::Postgres(c) => {
+            // Use the positional fetcher and join columns with '|'.
+            let pg_rows = c.query(sql, &[]).map_err(|e| {
+                trace(&format!("fetch_text/postgres query error: {e}"));
+                set_err(ERR_CONTEXT_FAILURE)
+            })?;
+            let mut out = Vec::with_capacity(pg_rows.len().min(limit));
+            for r in pg_rows.into_iter().take(limit) {
+                let cols = r.columns().len();
+                let parts: Vec<String> = (0..cols)
+                    .map(|i| {
+                        r.try_get::<_, Option<String>>(i)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                out.push(parts.join("|"));
             }
+            Ok(out)
         }
-        Ok(rows)
+        SqlConn::Sqlite(c) => {
+            let mut stmt = c
+                .prepare(sql)
+                .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
+            let n_cols = stmt.column_count();
+            let mut sql_rows = stmt
+                .query([])
+                .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
+            let mut out = Vec::new();
+            while out.len() < limit {
+                let Some(r) = sql_rows
+                    .next()
+                    .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?
+                else {
+                    break;
+                };
+                let parts: Vec<String> = (0..n_cols)
+                    .map(|i| match r.get::<_, rusqlite::types::Value>(i) {
+                        Ok(rusqlite::types::Value::Text(s)) => s,
+                        Ok(rusqlite::types::Value::Integer(i)) => i.to_string(),
+                        Ok(rusqlite::types::Value::Real(f)) => f.to_string(),
+                        Ok(rusqlite::types::Value::Blob(b)) => {
+                            String::from_utf8_lossy(&b).into_owned()
+                        }
+                        _ => String::new(),
+                    })
+                    .collect();
+                out.push(parts.join("|"));
+            }
+            Ok(out)
+        }
     })
 }
 
-/// Auto-discover table schema from SQL Server when no INT file metadata exists.
-/// Uses the open path's directory to determine the database (G:\PACIFIC → GPacific).
-/// Falls back to global defaults from wxbtrv.db config.
+fn fetch_text_mssql(
+    c: &mut OdbcConn<'static>,
+    sql: &str,
+    limit: usize,
+) -> Result<Vec<String>, i32> {
+    let mut rows = Vec::new();
+    if let Some(mut cursor) = c
+        .execute(sql, ())
+        .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?
+    {
+        let n_cols = cursor.num_result_cols().unwrap_or(8).max(0) as u16;
+        while rows.len() < limit {
+            let next = cursor
+                .next_row()
+                .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
+            let Some(mut r) = next else { break };
+            let mut out = String::new();
+            for col in 1..=n_cols {
+                let mut v = Vec::new();
+                let has = r
+                    .get_text(col, &mut v)
+                    .map_err(|_| set_err(ERR_CONTEXT_FAILURE))?;
+                if !has {
+                    break;
+                }
+                if !out.is_empty() {
+                    out.push('|');
+                }
+                out.push_str(String::from_utf8_lossy(&v).as_ref());
+            }
+            rows.push(out);
+        }
+    }
+    Ok(rows)
+}
+
+/// Auto-discover table schema. Currently MSSQL-only via INFORMATION_SCHEMA.
+/// Other backends return Err(12 NOT_FOUND); their discovery paths land in
+/// step 3/4 of the multi-backend rollout.
 pub fn discover_table_meta(
     table_name: &str,
     open_path: &str,
 ) -> Result<crate::state::TableMeta, i32> {
     use crate::state::{IntField, RuntimeIndex, TableMeta};
+
+    let backend = {
+        let st = state().lock().map_err(|_| 12i32)?;
+        st.backend
+    };
+    if backend != Backend::Mssql {
+        strace!("discover_table_meta: backend {} not yet supported", backend.as_str());
+        return Err(12);
+    }
 
     let dir = crate::state::dir_from_path(open_path);
     let db_name = crate::state::resolve_config(&dir, "DATABASE");
@@ -446,12 +731,14 @@ pub fn discover_table_meta(
         schema_name
     );
 
-    let col_sql =
-        format!(
+    let col_sql = format!(
         "SELECT COLUMN_NAME, DATA_TYPE, COALESCE(CHARACTER_MAXIMUM_LENGTH,0), ORDINAL_POSITION \
          FROM [{db}].INFORMATION_SCHEMA.COLUMNS \
          WHERE TABLE_SCHEMA='{sc}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION",
-        db=db_name, sc=schema_name, tbl=table_name);
+        db = db_name,
+        sc = schema_name,
+        tbl = table_name
+    );
 
     let col_rows = fetch_rows_positional(&col_sql, 4, 200)?;
     if col_rows.is_empty() {
@@ -509,9 +796,6 @@ pub fn discover_table_meta(
     }
 
     let record_length = offset;
-
-    // No index discovery from SQL Server — indexes come from table configs only.
-    // Auto-discovered tables have fields but no indexes.
     let indexes: Vec<RuntimeIndex> = Vec::new();
 
     strace!(

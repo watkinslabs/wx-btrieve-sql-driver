@@ -6,6 +6,7 @@
 //! future Linux driver port.
 
 pub mod constants;
+pub mod dialect;
 pub mod opcode_map;
 pub mod ops;
 pub mod record;
