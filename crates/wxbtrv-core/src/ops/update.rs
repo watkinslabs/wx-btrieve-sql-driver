@@ -2,11 +2,57 @@
 
 use super::helpers::{get_lock_prefix, posblk_key, strace};
 use crate::constants::*;
-use crate::record::{pack_row, unpack_row};
-use crate::sql::{execute_sql, fetch_one_row, lock_row, unlock_row};
-use crate::state::state;
+use crate::dialect::select_with_limit;
+use crate::record::{pack_row, unpack_row_typed};
+use crate::sql::{execute_with, fetch_with, lock_row, unlock_row};
+use crate::sql_param::SqlValue;
+use crate::state::{state, TableMeta};
 use core::ffi::c_void;
 use core::slice;
+
+/// Build a parameterized UPDATE for `meta` setting every non-autoinc field
+/// to its corresponding value from the unpacked record. Returns
+/// `(sql, params)`. The recnum predicate's marker is the last placeholder.
+fn build_parameterized_update(
+    meta: &TableMeta,
+    record: &[u8],
+    recnum: i64,
+) -> Option<(String, Vec<SqlValue>)> {
+    let dialect = crate::dialect::active();
+    let cols = unpack_row_typed(&meta.fields, record);
+    let rc_col = &meta.recnum_col;
+    let is_sql_identity = rc_col != "MDS_RECNUM";
+    let mut params: Vec<SqlValue> = Vec::new();
+    let mut set_parts: Vec<String> = Vec::new();
+    for ((name, value), f) in cols.into_iter().zip(meta.fields.iter()) {
+        if f.native_type == 14
+            || f.native_type == 15
+            || (is_sql_identity && f.name.eq_ignore_ascii_case(rc_col))
+        {
+            continue;
+        }
+        params.push(value);
+        set_parts.push(format!(
+            "{} = {}",
+            dialect.quote_ident(&name),
+            dialect.param_marker(params.len())
+        ));
+    }
+    if set_parts.is_empty() {
+        return None;
+    }
+    params.push(SqlValue::I64(recnum));
+    let where_marker = dialect.param_marker(params.len());
+    let tref = meta.table_ref("", "");
+    let sql = format!(
+        "UPDATE {} SET {} WHERE {} = {}",
+        tref,
+        set_parts.join(", "),
+        meta.recnum_sql_ref(),
+        where_marker
+    );
+    Some((sql, params))
+}
 
 /// **Op 3 — Update** (`B_UPDATE`)
 ///
@@ -56,32 +102,9 @@ pub(super) fn op_update(posblk: *mut c_void, data_buf: *const c_void, data_len: 
     }
     let record = unsafe { slice::from_raw_parts(data_buf as *const u8, dlen) };
 
-    let cols = unpack_row(&meta.fields, record);
-    let rc_col = &meta.recnum_col;
-    let is_sql_identity = rc_col != "MDS_RECNUM";
-    let set_clause: String = cols
-        .iter()
-        .zip(meta.fields.iter())
-        .filter(|(_, f)| {
-            f.native_type != 14
-                && f.native_type != 15
-                && !(is_sql_identity && f.name.eq_ignore_ascii_case(rc_col))
-        })
-        .map(|((n, v), _)| format!("[{}] = {}", n.replace(']', "]]"), v))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    if set_clause.is_empty() {
+    let Some((sql, params)) = build_parameterized_update(&meta, record, recnum) else {
         return BTR_DATA_TOO_SHORT;
-    }
-    let tref = meta.table_ref("", "");
-    let sql = format!(
-        "UPDATE {} SET {} WHERE {} = {}",
-        tref,
-        set_clause,
-        meta.recnum_sql_ref(),
-        recnum
-    );
+    };
     strace!("op_update h={} rn={} sql={}", hid, recnum, sql);
     let prefix = match get_lock_prefix(hid) {
         Ok(p) => p,
@@ -90,7 +113,7 @@ pub(super) fn op_update(posblk: *mut c_void, data_buf: *const c_void, data_len: 
     if let Err(e) = lock_row(&prefix, recnum) {
         return e;
     }
-    let rc = match execute_sql(&sql) {
+    let rc = match execute_with(&sql, &params) {
         Ok(_) => BTR_SUCCESS,
         Err(e) => e,
     };
@@ -267,14 +290,11 @@ pub(super) fn op_update_chunk(
 
     // Fetch current record.
     let cols = meta.select_with_recnum();
+    let dialect = crate::dialect::active();
     let tref = meta.table_ref("", "");
-    let sql_sel = format!(
-        "SELECT TOP 1 {} FROM {} WHERE {} = {}",
-        cols,
-        tref,
-        meta.recnum_sql_ref(),
-        recnum
-    );
+    let where_marker = dialect.param_marker(1);
+    let where_clause = format!("{} = {}", meta.recnum_sql_ref(), where_marker);
+    let sql_sel = select_with_limit(dialect, 1, &cols, &tref, &where_clause, "");
     let recnum_is_field = meta
         .fields
         .iter()
@@ -284,8 +304,14 @@ pub(super) fn op_update_chunk(
     } else {
         1 + meta.fields.len()
     };
-    let row = match fetch_one_row(&sql_sel, n_cols) {
-        Ok(r) => r,
+    let row = match fetch_with(&sql_sel, &[SqlValue::I64(recnum)], n_cols, 1) {
+        Ok(mut rs) => match rs.pop() {
+            Some(r) => r,
+            None => {
+                strace!("op_update_chunk h={} no row", hid);
+                return BTR_INVALID_POS;
+            }
+        },
         Err(e) => {
             strace!("op_update_chunk h={} fetch err={}", hid, e);
             return BTR_INVALID_POS;
@@ -320,31 +346,10 @@ pub(super) fn op_update_chunk(
         data_ptr += *len;
     }
 
-    // Now push the mutated record via a standard UPDATE — reuse op_update's SET logic.
-    let cols_vals = unpack_row(&meta.fields, &packed);
-    let rc_col = &meta.recnum_col;
-    let is_sql_identity = rc_col != "MDS_RECNUM";
-    let set_clause: String = cols_vals
-        .iter()
-        .zip(meta.fields.iter())
-        .filter(|(_, f)| {
-            f.native_type != 14
-                && f.native_type != 15
-                && !(is_sql_identity && f.name.eq_ignore_ascii_case(rc_col))
-        })
-        .map(|((n, v), _)| format!("[{}] = {}", n.replace(']', "]]"), v))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if set_clause.is_empty() {
+    // Push the mutated record via a parameterized UPDATE — same path as op_update.
+    let Some((sql_upd, params)) = build_parameterized_update(&meta, &packed, recnum) else {
         return BTR_DATA_TOO_SHORT;
-    }
-    let sql_upd = format!(
-        "UPDATE {} SET {} WHERE {} = {}",
-        tref,
-        set_clause,
-        meta.recnum_sql_ref(),
-        recnum
-    );
+    };
     strace!("op_update_chunk h={} sql={}", hid, sql_upd);
     let prefix = match get_lock_prefix(hid) {
         Ok(p) => p,
@@ -353,7 +358,7 @@ pub(super) fn op_update_chunk(
     if let Err(e) = lock_row(&prefix, recnum) {
         return e;
     }
-    let rc = match execute_sql(&sql_upd) {
+    let rc = match execute_with(&sql_upd, &params) {
         Ok(_) => BTR_SUCCESS,
         Err(e) => e,
     };
