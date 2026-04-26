@@ -8,6 +8,7 @@ members = [
     "crates/wxbtrv-sys",
     "crates/installer",
     "crates/btr-test-harness",
+    "crates/wxbtrv-web",
 ]
 # rtool is intentionally NOT a workspace member — it's private and gitignored
 # Fuzz crates depend on libfuzzer-sys (nightly + sanitizers); keep them out of

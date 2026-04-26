@@ -7,6 +7,8 @@
 use crate::schema::SqlConfig;
 use btr_types::{codec::TYPE_LSTRING, sql_type, IntField, IntFile};
 
+// One per process — same rationale as wxbtrv-core::sql::SqlConn.
+#[allow(clippy::large_enum_variant)]
 pub enum SqlConnection {
     Mssql(odbc_api::Connection<'static>),
     Postgres(postgres::Client),

@@ -9,15 +9,11 @@
 /// (built with db_config).  When --auto-schema is set, missing schemas are
 /// derived from the .B file's FCR (File Control Record) and optionally saved
 /// back to wxbtrv.db with --save-schema.
+use btr_import::{bfile, schema, sqlsrv};
+use btr_types::unpack_row;
 use clap::{Parser, Subcommand};
 use sqlsrv::SqlConnection;
 use std::path::{Path, PathBuf};
-
-mod bfile;
-mod schema;
-mod sqlsrv;
-
-use btr_types::unpack_row;
 
 // ── CLI ────────────────────────────────────────────────────────────────────────
 

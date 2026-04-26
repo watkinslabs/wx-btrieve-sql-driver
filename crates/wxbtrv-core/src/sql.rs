@@ -23,6 +23,10 @@ pub static TXN_ACTIVE: AtomicBool = AtomicBool::new(false);
 // One connection per process, behind a Mutex — Btrieve is fundamentally
 // single-threaded per position-block, so serializing is fine.
 
+// Variants vary widely in size (postgres::Client is much larger than the
+// other two); allow the clippy hit since this enum lives behind a
+// process-global Mutex and is allocated at most once.
+#[allow(clippy::large_enum_variant)]
 enum SqlConn {
     Mssql(OdbcConn<'static>),
     Postgres(postgres::Client),

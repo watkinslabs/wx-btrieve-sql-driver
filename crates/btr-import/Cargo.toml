@@ -3,6 +3,10 @@ name    = "btr-import"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "btr_import"
+path = "src/lib.rs"
+
 [[bin]]
 name = "btr-import"
 path = "src/main.rs"
