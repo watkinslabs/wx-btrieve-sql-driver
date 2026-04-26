@@ -303,6 +303,95 @@ export const bimport = {
     post<BImportStats>("/api/bimport/dir", { dir, recursive, ...options }),
 };
 
+// ── SSE: streaming variants of the .B importers ───────────────────────
+
+export interface StreamHandlers {
+  onLog?: (line: string) => void;
+  onDone?: (stats: BImportStats) => void;
+  onError?: (msg: string) => void;
+}
+
+async function streamPost(
+  path: string,
+  body: unknown,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const j = await res.json();
+      if (j?.error) detail = String(j.error);
+    } catch {
+      // not JSON
+    }
+    handlers.onError?.(detail);
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const ev = parseSseFrame(frame);
+      if (!ev) continue;
+      if (ev.event === "log") {
+        handlers.onLog?.(ev.data);
+      } else if (ev.event === "done") {
+        try {
+          handlers.onDone?.(JSON.parse(ev.data) as BImportStats);
+        } catch {
+          handlers.onError?.("malformed done payload");
+        }
+      } else if (ev.event === "error") {
+        try {
+          handlers.onError?.((JSON.parse(ev.data) as { error: string }).error);
+        } catch {
+          handlers.onError?.(ev.data);
+        }
+      }
+    }
+  }
+}
+
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      data.push(line.slice(5).replace(/^ /, ""));
+    }
+  }
+  if (data.length === 0) return null;
+  return { event, data: data.join("\n") };
+}
+
+export const bimportStream = {
+  importFiles: (files: string[], options: BImportOptions, handlers: StreamHandlers, signal?: AbortSignal) =>
+    streamPost("/api/bimport/files/stream", { files, ...options }, handlers, signal),
+  importDir: (
+    dir: string,
+    recursive: boolean,
+    options: BImportOptions,
+    handlers: StreamHandlers,
+    signal?: AbortSignal,
+  ) => streamPost("/api/bimport/dir/stream", { dir, recursive, ...options }, handlers, signal),
+};
+
 // SQLite filter shared by Open/Create wxbtrv.db pickers.
 export const WXBTRV_DB_FILTER: FilterSpec = {
   name: "wxbtrv config",

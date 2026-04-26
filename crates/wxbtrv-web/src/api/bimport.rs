@@ -2,9 +2,15 @@
 //! the UI can drive Btrieve flat-file migrations into the configured
 //! backend (MSSQL/Postgres/SQLite) without shelling out.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    response::sse::{Event, KeepAlive, Sse},
+    Json,
+};
 use btr_import::runner::{self, ImportOptions};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 use crate::state::{ApiError, AppState};
@@ -90,6 +96,77 @@ pub async fn import_files(
         records: stats.records,
         log: stats.log,
     }))
+}
+
+// ── Streaming variants (SSE) ──────────────────────────────────────────
+
+/// Spawn the blocking importer on a worker thread and forward each log
+/// line as an SSE `log` event. When done, emits a single `done` event
+/// carrying the full stats payload (or an `error` event on failure).
+fn stream_import(
+    db_path: PathBuf,
+    files: Vec<PathBuf>,
+    opts: ImportOptions,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let tx_log = tx.clone();
+    let tx_end = tx.clone();
+    std::thread::spawn(move || {
+        let result = runner::import_files_with_logger(&db_path, &files, &opts, |line| {
+            let _ = tx_log.send(Event::default().event("log").data(line));
+        });
+        let final_evt = match result {
+            Ok(s) => Event::default().event("done").json_data(ImportStatsResponse {
+                files_ok: s.files_ok,
+                files_skipped: s.files_skipped,
+                records: s.records,
+                log: s.log,
+            }),
+            Err(e) => Event::default().event("error").json_data(ErrorPayload { error: e }),
+        };
+        if let Ok(evt) = final_evt {
+            let _ = tx_end.send(evt);
+        }
+        drop(tx_end);
+    });
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(evt) = rx.recv().await {
+            yield Ok::<_, Infallible>(evt);
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(Serialize)]
+struct ErrorPayload {
+    error: String,
+}
+
+pub async fn import_files_stream(
+    State(state): State<AppState>,
+    Json(req): Json<ImportBFilesRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let p = db_path(&state)?;
+    let files: Vec<PathBuf> = req.files.into_iter().map(PathBuf::from).collect();
+    Ok(stream_import(p, files, req.options.into_runner()))
+}
+
+pub async fn import_dir_stream(
+    State(state): State<AppState>,
+    Json(req): Json<ImportBDirRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let p = db_path(&state)?;
+    let dir = PathBuf::from(req.dir);
+    let recursive = req.recursive.unwrap_or(false);
+    let files = runner::collect_b_files(&dir, recursive);
+    if files.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "no .B files found in {}",
+            dir.display()
+        )));
+    }
+    Ok(stream_import(p, files, req.options.into_runner()))
 }
 
 pub async fn import_dir(

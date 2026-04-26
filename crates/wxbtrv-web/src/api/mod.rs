@@ -66,6 +66,8 @@ pub fn router(state: AppState) -> Router {
         .route("/bimport/info", post(bimport::info))
         .route("/bimport/files", post(bimport::import_files))
         .route("/bimport/dir", post(bimport::import_dir))
+        .route("/bimport/files/stream", post(bimport::import_files_stream))
+        .route("/bimport/dir/stream", post(bimport::import_dir_stream))
         .with_state(state);
 
     Router::new()

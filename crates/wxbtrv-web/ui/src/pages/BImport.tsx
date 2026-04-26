@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle2, Info, Loader2, XCircle } from "lucide-react";
-import { api, bimport, type BInfo, type BImportStats } from "@/api";
+import { api, bimport, bimportStream, type BImportStats, type BInfo } from "@/api";
 import { useProject } from "@/project";
 
 export function BImportPage() {
@@ -84,6 +84,8 @@ function FileImporter() {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<BImportStats | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
 
   async function pick() {
     const r = await api.pickOpen({
@@ -97,13 +99,29 @@ function FileImporter() {
     setBusy(true);
     setStats(null);
     setErr(null);
+    setLogs([]);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
-      setStats(await bimport.importFiles(files, opts));
+      await bimportStream.importFiles(
+        files,
+        opts,
+        {
+          onLog: (l) => setLogs((cur) => [...cur, l]),
+          onDone: setStats,
+          onError: setErr,
+        },
+        ctrl.signal,
+      );
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
+      if (e?.name !== "AbortError") setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
+  }
+  function cancel() {
+    abortRef.current?.abort();
   }
 
   return (
@@ -131,8 +149,19 @@ function FileImporter() {
         </ul>
       )}
       <OptionsBlock opts={opts} setOpts={setOpts} />
-      <RunButton busy={busy} label="Import" onClick={run} disabled={files.length === 0} />
+      <div className="flex items-center gap-2">
+        <RunButton busy={busy} label="Import" onClick={run} disabled={files.length === 0} />
+        {busy && (
+          <button
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+        )}
+      </div>
       {err && <ErrBox msg={err} />}
+      <LogStream busy={busy} lines={logs} />
       {stats && <StatsBox stats={stats} />}
     </Card>
   );
@@ -145,6 +174,8 @@ function DirImporter() {
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<BImportStats | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
 
   async function pick() {
     const r = await api.pickDir({ title: "Select a directory of .B files" });
@@ -154,13 +185,30 @@ function DirImporter() {
     setBusy(true);
     setStats(null);
     setErr(null);
+    setLogs([]);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
-      setStats(await bimport.importDir(dir, recursive, opts));
+      await bimportStream.importDir(
+        dir,
+        recursive,
+        opts,
+        {
+          onLog: (l) => setLogs((cur) => [...cur, l]),
+          onDone: setStats,
+          onError: setErr,
+        },
+        ctrl.signal,
+      );
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
+      if (e?.name !== "AbortError") setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
+  }
+  function cancel() {
+    abortRef.current?.abort();
   }
 
   return (
@@ -185,10 +233,30 @@ function DirImporter() {
       </label>
       <Toggle label="Recursive" checked={recursive} onChange={setRecursive} />
       <OptionsBlock opts={opts} setOpts={setOpts} />
-      <RunButton busy={busy} label="Import directory" onClick={run} disabled={!dir} />
+      <div className="flex items-center gap-2">
+        <RunButton busy={busy} label="Import directory" onClick={run} disabled={!dir} />
+        {busy && (
+          <button
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+        )}
+      </div>
       {err && <ErrBox msg={err} />}
+      <LogStream busy={busy} lines={logs} />
       {stats && <StatsBox stats={stats} />}
     </Card>
+  );
+}
+
+function LogStream({ busy, lines }: { busy: boolean; lines: string[] }) {
+  if (!busy && lines.length === 0) return null;
+  return (
+    <pre className="max-h-72 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+      {lines.length === 0 ? <span className="text-zinc-500">waiting…</span> : lines.join("\n")}
+    </pre>
   );
 }
 

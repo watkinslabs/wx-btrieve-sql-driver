@@ -31,6 +31,8 @@ btr-types.workspace = true
 rusqlite.workspace  = true
 odbc-api.workspace  = true
 postgres            = "0.19"
+futures-util        = "0.3"
+async-stream        = "0.3"
 
 # Open the system browser at startup
 opener          = "0.7"

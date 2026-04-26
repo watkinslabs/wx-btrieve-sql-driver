@@ -53,6 +53,21 @@ pub fn import_files(
     files: &[PathBuf],
     opts: &ImportOptions,
 ) -> Result<ImportStats, String> {
+    import_files_with_logger(db_path, files, opts, |_| {})
+}
+
+/// Same as `import_files` but invokes `log` for every per-step message
+/// as it happens, instead of buffering them all into the returned stats.
+/// Use this for streaming progress to a UI.
+pub fn import_files_with_logger<F>(
+    db_path: &Path,
+    files: &[PathBuf],
+    opts: &ImportOptions,
+    mut log: F,
+) -> Result<ImportStats, String>
+where
+    F: FnMut(&str),
+{
     if opts.table.is_some() && files.len() > 1 {
         return Err("table override only valid with a single file".into());
     }
@@ -76,12 +91,16 @@ pub fn import_files(
     };
 
     let mut stats = ImportStats::default();
+    let mut emit = |msg: String| {
+        log(&msg);
+        stats.log.push(msg);
+    };
     for file in files {
         let table_name = opts
             .table
             .clone()
             .unwrap_or_else(|| schema::table_name_from_path(file));
-        match load_schema_for_file(&conn, &table_name, file, opts, &mut stats) {
+        match load_schema_for_file(&conn, &table_name, file, opts, &mut emit) {
             Ok(int_file) => match import_one(
                 file,
                 &int_file,
@@ -89,31 +108,33 @@ pub fn import_files(
                 cfg.backend.as_str(),
                 opts,
                 &collation,
-                &mut stats,
+                &mut emit,
             ) {
-                Ok(()) => {
+                Ok(records) => {
                     stats.files_ok += 1;
+                    stats.records += records;
                 }
                 Err(e) => {
                     stats.files_skipped += 1;
-                    stats.log.push(format!("skip {}: {e}", file.display()));
+                    emit(format!("skip {}: {e}", file.display()));
                 }
             },
             Err(e) => {
                 stats.files_skipped += 1;
-                stats.log.push(format!("skip {}: {e}", file.display()));
+                emit(format!("skip {}: {e}", file.display()));
             }
         }
     }
+    drop(emit);
     Ok(stats)
 }
 
-fn load_schema_for_file(
+fn load_schema_for_file<E: FnMut(String)>(
     conn: &rusqlite::Connection,
     table_name: &str,
     file: &Path,
     opts: &ImportOptions,
-    stats: &mut ImportStats,
+    emit: &mut E,
 ) -> Result<IntFile, String> {
     match schema::load_table(conn, table_name) {
         Ok(s) => Ok(s),
@@ -128,16 +149,14 @@ fn load_schema_for_file(
 
             let uncovered = b.record_length as u32 - covered_bytes(&b);
             if uncovered > 0 {
-                stats.log.push(format!(
+                emit(format!(
                     "{}: {} bytes uncovered by key fields — non-key fields missing from import",
                     table_name, uncovered
                 ));
             }
             if opts.save_schema {
                 schema::upsert_table(conn, &int_file)?;
-                stats
-                    .log
-                    .push(format!("{}: schema saved to wxbtrv.db", table_name));
+                emit(format!("{}: schema saved to wxbtrv.db", table_name));
             }
             Ok(int_file)
         }
@@ -146,20 +165,20 @@ fn load_schema_for_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn import_one(
+fn import_one<E: FnMut(String)>(
     path: &Path,
     int_file: &IntFile,
     sql_conn: Option<&mut sqlsrv::SqlConnection>,
     backend: &str,
     opts: &ImportOptions,
     collation: &str,
-    stats: &mut ImportStats,
-) -> Result<(), String> {
+    emit: &mut E,
+) -> Result<u64, String> {
     let bf = bfile::BtrieveFile::open(path)?;
     let h = &bf.header;
 
     if h.logical_rec_len > 0 && h.logical_rec_len != int_file.record_length {
-        stats.log.push(format!(
+        emit(format!(
             "warning: {} FCR rec_len={} but schema record_length={} — using schema",
             path.display(),
             h.logical_rec_len,
@@ -205,16 +224,15 @@ fn import_one(
         total += batch.len() as u64;
     }
 
-    stats.records += total;
     let mode = if opts.dry_run { " (dry-run)" } else { "" };
-    stats.log.push(format!(
+    emit(format!(
         "{}: {} records → {}{}",
         path.display(),
         total,
         sqlsrv::table_ref(backend, int_file),
         mode
     ));
-    Ok(())
+    Ok(total)
 }
 
 /// Header / FCR summary for a single .B file.
