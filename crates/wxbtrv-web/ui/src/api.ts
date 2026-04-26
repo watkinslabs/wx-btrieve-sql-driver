@@ -2,29 +2,53 @@
 
 export type Backend = "mssql" | "postgres" | "sqlite";
 
-export interface ConnectionConfig {
-  backend: Backend;
-  server: string;
-  database: string;
-  schema: string;
-  driver: string;
-  network: string;
-  user: string;
-  password: string;
-  has_password: boolean;
-  trusted_connection: boolean;
-  encrypt: boolean;
-  trust_server_certificate: boolean;
-  recnum_column: string;
+// ── Project (open wxbtrv.db) ──────────────────────────────────────────
+
+export interface CurrentProject {
+  path: string | null;
 }
 
-export interface UpdateConnection extends Partial<Omit<ConnectionConfig, "has_password">> {}
+export interface RecentEntry {
+  path: string;
+  opened_at: number;
+}
+
+// ── Connections ───────────────────────────────────────────────────────
+
+export interface ConnectionFields {
+  backend?: Backend | null;
+  server?: string | null;
+  database?: string | null;
+  schema?: string | null;
+  driver?: string | null;
+  network?: string | null;
+  user?: string | null;
+  password?: string | null;
+  has_password?: boolean | null;
+  trusted_connection?: boolean | null;
+  encrypt?: boolean | null;
+  trust_server_certificate?: boolean | null;
+  recnum_column?: string | null;
+}
+
+export interface ConnectionEntry {
+  name: string;
+  is_global: boolean;
+  fields: ConnectionFields;
+}
+
+export interface ResolvedConnection {
+  name: string;
+  fields: ConnectionFields;
+}
 
 export interface TestConnectionResult {
   ok: boolean;
   backend: string;
   message: string;
 }
+
+// ── Tables ────────────────────────────────────────────────────────────
 
 export interface TableSummary {
   table_name: string;
@@ -68,6 +92,26 @@ export interface TableDetail {
   indexes: IndexRow[];
 }
 
+// ── File pickers ──────────────────────────────────────────────────────
+
+export interface FilterSpec {
+  name: string;
+  ext: string[];
+}
+
+export interface PickerOptions {
+  title?: string;
+  filters?: FilterSpec[];
+  suggest_name?: string;
+  start_dir?: string;
+}
+
+export interface PickedPath {
+  path: string | null;
+}
+
+// ── Fetch wrapper ─────────────────────────────────────────────────────
+
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -88,16 +132,49 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+const post = <T,>(path: string, body?: unknown) =>
+  jsonFetch<T>(path, { method: "POST", body: body ? JSON.stringify(body) : "{}" });
+
 export const api = {
   health: () => fetch("/api/health").then((r) => r.text()),
-  getConfig: () => jsonFetch<ConnectionConfig>("/api/config"),
-  setBackend: (body: UpdateConnection) =>
-    jsonFetch<{ ok: boolean }>("/api/config/backend", {
-      method: "POST",
-      body: JSON.stringify(body),
+
+  // Project
+  currentProject: () => jsonFetch<CurrentProject>("/api/project"),
+  openProject: (path: string) => post<CurrentProject>("/api/project/open", { path }),
+  closeProject: () => post<CurrentProject>("/api/project/close"),
+  initProject: (path: string, overwrite = false) =>
+    post<CurrentProject>("/api/project/init", { path, overwrite }),
+  recent: () => jsonFetch<RecentEntry[]>("/api/project/recent"),
+  forgetRecent: (path: string) => post<{ ok: boolean }>("/api/project/forget", { path }),
+
+  // File pickers
+  pickOpen: (opts: PickerOptions = {}) => post<PickedPath>("/api/fs/pick-open", opts),
+  pickSave: (opts: PickerOptions = {}) => post<PickedPath>("/api/fs/pick-save", opts),
+  pickDir: (opts: PickerOptions = {}) => post<PickedPath>("/api/fs/pick-dir", opts),
+
+  // Connections
+  listConnections: () => jsonFetch<ConnectionEntry[]>("/api/connections"),
+  getConnection: (name: string) =>
+    jsonFetch<ConnectionEntry>(`/api/connections/${encodeURIComponent(name)}`),
+  resolvedConnection: (name: string) =>
+    jsonFetch<ResolvedConnection>(`/api/connections/${encodeURIComponent(name)}/resolved`),
+  upsertConnection: (name: string, fields: ConnectionFields) =>
+    post<{ ok: boolean }>(`/api/connections/${encodeURIComponent(name)}`, fields),
+  deleteConnection: (name: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/connections/${encodeURIComponent(name)}`, {
+      method: "DELETE",
     }),
-  testConnection: () =>
-    jsonFetch<TestConnectionResult>("/api/test-connection", { method: "POST" }),
+  testConnection: (name: string, draft?: ConnectionFields) =>
+    post<TestConnectionResult>("/api/connections/test", { name, draft }),
+
+  // Tables
   listTables: () => jsonFetch<TableSummary[]>("/api/tables"),
-  showTable: (name: string) => jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
+  showTable: (name: string) =>
+    jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
+};
+
+// SQLite filter shared by Open/Create wxbtrv.db pickers.
+export const WXBTRV_DB_FILTER: FilterSpec = {
+  name: "wxbtrv config",
+  ext: ["db", "sqlite", "sqlite3"],
 };

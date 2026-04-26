@@ -1,11 +1,13 @@
-//! AppState — request-scoped handle to the wxbtrv.db file.
+//! AppState — handle to the currently-open `wxbtrv.db` file.
 //!
-//! Resolution: explicit `--db` flag wins. Otherwise we fall back to
-//! `wxbtrv.db` in CWD; if that's missing, we leave the path None and
-//! the API endpoints surface a 404 / explanatory error.
+//! One project open at a time, switchable at runtime via the
+//! `/api/project/*` endpoints. Optional `--db <path>` on the CLI just
+//! pre-opens a project at startup.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,57 +15,131 @@ pub struct AppState {
 }
 
 struct Inner {
-    db_path: Option<PathBuf>,
+    /// Currently-open wxbtrv.db. `None` when the user hasn't opened a
+    /// project yet — every endpoint that needs the DB returns 404 in
+    /// that case so the UI can render a "no project" empty state.
+    db_path: RwLock<Option<PathBuf>>,
 }
 
 impl AppState {
-    pub fn new(explicit_db: Option<PathBuf>) -> Self {
-        let resolved = explicit_db.or_else(|| {
-            let cwd = std::env::current_dir().ok()?;
-            let p = cwd.join("wxbtrv.db");
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
+    pub fn new(initial: Option<PathBuf>) -> Self {
+        let resolved = initial.or_else(|| {
+            let p = std::env::current_dir().ok()?.join("wxbtrv.db");
+            p.exists().then_some(p)
         });
+        if let Some(p) = &resolved {
+            push_recent(p);
+        }
         Self {
-            inner: Arc::new(Inner { db_path: resolved }),
+            inner: Arc::new(Inner {
+                db_path: RwLock::new(resolved),
+            }),
         }
     }
 
-    /// Returns the configured path, or 404-mapped `None` if no
-    /// wxbtrv.db is reachable.
-    pub fn db_path(&self) -> Option<&PathBuf> {
-        self.inner.db_path.as_ref()
+    pub fn db_path(&self) -> Option<PathBuf> {
+        self.inner.db_path.read().ok().and_then(|g| g.clone())
     }
 
-    /// Open a fresh read-only connection. Each request gets its own.
+    /// Switch the open project. Caller is responsible for ensuring the
+    /// path exists / is initialized — `set_path()` is the dumb store.
+    pub fn set_path(&self, path: PathBuf) {
+        if let Ok(mut g) = self.inner.db_path.write() {
+            *g = Some(path.clone());
+        }
+        push_recent(&path);
+    }
+
+    pub fn close(&self) {
+        if let Ok(mut g) = self.inner.db_path.write() {
+            *g = None;
+        }
+    }
+
     pub fn open(&self) -> Result<rusqlite::Connection, ApiError> {
         let p = self
-            .inner
-            .db_path
-            .as_ref()
-            .ok_or_else(|| ApiError::not_found("no wxbtrv.db found — pass --db <path>"))?;
-        rusqlite::Connection::open(p).map_err(|e| ApiError::internal(format!("open {}: {e}", p.display())))
+            .db_path()
+            .ok_or_else(|| ApiError::not_found("no project open"))?;
+        rusqlite::Connection::open(&p)
+            .map_err(|e| ApiError::internal(format!("open {}: {e}", p.display())))
     }
 
-    /// Open a fresh read-write connection. Reserved for the upcoming
-    /// import / set-config endpoints; un-used today but harmless.
-    #[allow(dead_code)]
     pub fn open_rw(&self) -> Result<rusqlite::Connection, ApiError> {
-        // SQLite OpenFlags default already allows read+write+create; explicit:
         let p = self
-            .inner
-            .db_path
-            .as_ref()
-            .ok_or_else(|| ApiError::not_found("no wxbtrv.db found — pass --db <path>"))?;
+            .db_path()
+            .ok_or_else(|| ApiError::not_found("no project open"))?;
         rusqlite::Connection::open_with_flags(
-            p,
+            &p,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
         )
         .map_err(|e| ApiError::internal(format!("open_rw {}: {e}", p.display())))
     }
+}
+
+// ── Recent-files store: ~/.config/wxbtrv-web/recent.json ──────────────────
+
+const RECENT_MAX: usize = 12;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecentEntry {
+    pub path: String,
+    /// Unix epoch seconds.
+    pub opened_at: u64,
+}
+
+fn recent_file() -> Option<PathBuf> {
+    let base = dirs::config_dir()?;
+    let dir = base.join("wxbtrv-web");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("recent.json"))
+}
+
+pub fn read_recent() -> Vec<RecentEntry> {
+    let Some(p) = recent_file() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(p) else { return Vec::new() };
+    serde_json::from_str::<Vec<RecentEntry>>(&text).unwrap_or_default()
+}
+
+pub fn push_recent(path: &Path) {
+    let path_str = path.to_string_lossy().to_string();
+    let mut list = read_recent();
+    list.retain(|e| e.path != path_str);
+    list.insert(
+        0,
+        RecentEntry {
+            path: path_str,
+            opened_at: now_epoch(),
+        },
+    );
+    if list.len() > RECENT_MAX {
+        list.truncate(RECENT_MAX);
+    }
+    if let Some(p) = recent_file() {
+        if let Ok(json) = serde_json::to_string_pretty(&list) {
+            let _ = std::fs::write(p, json);
+        }
+    }
+}
+
+pub fn forget_recent(path: &str) {
+    let mut list = read_recent();
+    let len = list.len();
+    list.retain(|e| e.path != path);
+    if list.len() != len {
+        if let Some(p) = recent_file() {
+            if let Ok(json) = serde_json::to_string_pretty(&list) {
+                let _ = std::fs::write(p, json);
+            }
+        }
+    }
+}
+
+fn now_epoch() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ── Error type ────────────────────────────────────────────────────────────

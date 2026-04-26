@@ -29,6 +29,13 @@ db-config       = { path = "../db-config" }
 btr-import      = { path = "../btr-import" }
 btr-types.workspace = true
 rusqlite.workspace  = true
+odbc-api.workspace  = true
+postgres            = "0.19"
 
 # Open the system browser at startup
 opener          = "0.7"
+# Native open/save/folder picker (talks to GTK/AppKit/Win32 via the
+# server-side process; fine because the UI runs against localhost).
+rfd             = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
+# OS-appropriate config dir for ~/.config/wxbtrv-web/recent.json
+dirs            = "5"
