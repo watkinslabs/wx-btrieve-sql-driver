@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "btr-import"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "btr-types",
  "clap",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "btr-test-harness"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "odbc-api",
  "postgres",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "btr-types"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "bumpalo"
@@ -889,7 +889,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "db-config"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "btr-types",
  "clap",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "installer"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
 ]
@@ -4109,7 +4109,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wxbtrv"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "btr-types",
  "odbc-api",
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "wxbtrv-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytes",
  "chrono",
@@ -4134,11 +4134,11 @@ dependencies = [
 
 [[package]]
 name = "wxbtrv-sys"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "wxbtrv-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-stream",
  "axum",
