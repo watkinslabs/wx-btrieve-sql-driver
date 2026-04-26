@@ -74,6 +74,26 @@ cargo build -p btr-import --release
 # Output: target/release/btr-import  (or btr-import.exe on Windows)
 ```
 
+## wxbtrv-web (Linux or Windows native)
+
+Single-binary local web UI. The build script bundles the React UI via
+`npm install` + `npm run build` before cargo embeds it with rust-embed.
+
+```bash
+# Linux (needs node + libdbus-1-dev for rfd's xdg-portal feature)
+sudo apt install -y nodejs npm libdbus-1-dev pkg-config unixodbc-dev
+cargo build -p wxbtrv-web --release
+# Output: target/release/wxbtrv-web
+
+# Windows (PowerShell, with node + Rust toolchain)
+cargo build -p wxbtrv-web --release
+# Output: target\release\wxbtrv-web.exe
+```
+
+If `npm` is missing the build still succeeds but the UI is replaced
+with a placeholder page (the `/api/*` endpoints still work). Set
+`WXBTRV_WEB_SKIP_UI=1` to skip the UI build deliberately.
+
 ## btr-test-harness
 
 Host-native integration test suite. 56 tests, one per opcode, running

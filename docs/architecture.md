@@ -39,9 +39,13 @@ Plus the support crates:
 - **`wxbtrv-sys`** — the 16-bit DOS driver (NASM).
 - **`btr-types`** — INT/MDS parser used only by the import/config tools.
 - **`db-config`** — CLI that builds and edits `wxbtrv.db`.
-- **`btr-import`** — CLI that migrates legacy `.B` flat files into SQL Server.
+- **`btr-import`** — CLI + `runner` library that migrates legacy `.B` flat
+  files into the configured backend (SQL Server / Postgres / SQLite).
+- **`wxbtrv-web`** — single-binary local HTTP server that wraps everything
+  the two CLIs do, plus a schema diff and a row preview, behind an
+  embedded React UI. Localhost-only. See [docs/web.md](web.md).
 - **`installer`** — self-bundling Windows installer that ships in releases.
-- **`btr-test-harness`** — 56 integration tests against a real SQL Server.
+- **`btr-test-harness`** — 56 integration tests against a real backend.
 
 ## Configuration
 
@@ -72,4 +76,5 @@ vars.
 | Integration test harness | Complete (56 opcode tests) |
 | `db-config` (schemas, connection, DDL) | Complete |
 | `.B` flat-file importer (`btr-import`) | Complete |
+| `wxbtrv-web` (local UI + API) | Complete |
 | Installer | Complete (shipped as `wlbtr-installer-vX.Y.Z-windows-i686.exe`) |
