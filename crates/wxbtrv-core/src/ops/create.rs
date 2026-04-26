@@ -20,8 +20,7 @@ use core::slice;
 /// column per declared key segment plus a generic `btrv_row` identity.
 ///
 /// - `posblk`: unused on input.
-/// - `data_buf`: 16-byte file spec header followed by 16-byte key segment
-///   specs. See `docs/btrieve-api/create.md` for layout.
+/// - `data_buf`: 16-byte file spec header followed by 16-byte key segment specs.
 /// - `data_len`: size of the descriptor in bytes.
 /// - `key_buf`: target pathname (up to 80 bytes, NUL/blank-terminated).
 /// - `key_num`: 0 = overwrite silently, -1 = fail with 59 if file exists.
