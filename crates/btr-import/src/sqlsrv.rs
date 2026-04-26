@@ -126,10 +126,12 @@ fn quote_ident(backend: &str, name: &str) -> String {
     }
 }
 
-fn col_def(backend: &str, f: &IntField, collation: &str) -> String {
+/// Render the SQL type clause for a single field, per backend. Public
+/// so the schema-diff tool can compute the same expected type that
+/// `gen_create_table` emits.
+pub fn sql_type_str(backend: &str, f: &IntField, collation: &str) -> String {
     let t = sql_type(f.native_type, f.length);
-    let ident = quote_ident(backend, &f.name);
-    let type_str = match (backend, t) {
+    match (backend, t) {
         ("mssql", "VARCHAR") => {
             let max_len = match f.native_type {
                 n if n == TYPE_LSTRING => f.length.saturating_sub(1),
@@ -160,7 +162,12 @@ fn col_def(backend: &str, f: &IntField, collation: &str) -> String {
         ("sqlite", "BIT") | ("sqlite", "TINYINT") | ("sqlite", "SMALLINT") | ("sqlite", "INT")
         | ("sqlite", "BIGINT") => "INTEGER".to_string(),
         (_, other) => other.to_string(),
-    };
+    }
+}
+
+fn col_def(backend: &str, f: &IntField, collation: &str) -> String {
+    let ident = quote_ident(backend, &f.name);
+    let type_str = sql_type_str(backend, f, collation);
     format!("    {} {} NULL", ident, type_str)
 }
 

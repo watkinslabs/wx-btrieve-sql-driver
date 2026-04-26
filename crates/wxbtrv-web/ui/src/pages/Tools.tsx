@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
-import { api, workflow, type OpResult } from "@/api";
+import { api, workflow, type ImportIntStats, type OpResult } from "@/api";
 import { useProject } from "@/project";
 
 export function ToolsPage() {
@@ -154,11 +154,44 @@ function ImportInt() {
   const [recursive, setRecursive] = useState(true);
   const [db, setDb] = useState("");
   const [schema, setSchema] = useState("");
-  const { busy, result, run } = useRunner();
+  const [busy, setBusy] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [stats, setStats] = useState<ImportIntStats | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   async function pick() {
     const r = await api.pickDir({ title: "Select INT directory" });
     if (r.path) setDir(r.path);
+  }
+
+  async function run() {
+    setBusy(true);
+    setLogs([]);
+    setStats(null);
+    setErr(null);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      await workflow.importIntStream(
+        [dir],
+        { recursive, db: db || undefined, schema: schema || undefined },
+        {
+          onLog: (l) => setLogs((cur) => [...cur, l]),
+          onDone: setStats,
+          onError: setErr,
+        },
+        ctrl.signal,
+      );
+    } catch (e: any) {
+      if (e?.name !== "AbortError") setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  }
+  function cancel() {
+    abortRef.current?.abort();
   }
 
   return (
@@ -194,20 +227,31 @@ function ImportInt() {
           />
         </label>
       </div>
-      <RunButton
-        busy={busy}
-        label="Import"
-        onClick={() =>
-          run(
-            workflow.importInt([dir], {
-              recursive,
-              db: db || undefined,
-              schema: schema || undefined,
-            }),
-          )
-        }
-      />
-      <ResultBox result={result} />
+      <div className="flex items-center gap-2">
+        <RunButton busy={busy} label="Import" onClick={run} />
+        {busy && (
+          <button
+            className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+      {err && <ResultBox result={{ ok: false, message: err }} />}
+      {(busy || logs.length > 0) && (
+        <pre className="max-h-72 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+          {logs.length === 0 ? "waiting…" : logs.join("\n")}
+        </pre>
+      )}
+      {stats && (
+        <ResultBox
+          result={{
+            ok: true,
+            message: `Imported ${stats.imported}, skipped ${stats.skipped}`,
+          }}
+        />
+      )}
     </Card>
   );
 }

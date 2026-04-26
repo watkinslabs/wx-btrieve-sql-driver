@@ -35,9 +35,31 @@ pub fn do_import_int(
     db_name_override: Option<&str>,
     schema_override: Option<&str>,
 ) -> Result<(), String> {
+    do_import_int_with_logger(
+        db_path,
+        dirs,
+        recursive,
+        db_name_override,
+        schema_override,
+        |line| println!("{line}"),
+    )
+    .map(|_| ())
+}
+
+/// Variant that drives every progress line through `log` instead of
+/// stdout. Used by wxbtrv-web's SSE endpoint to stream import progress
+/// to the UI.
+pub fn do_import_int_with_logger<F: FnMut(&str)>(
+    db_path: &Path,
+    dirs: &[PathBuf],
+    recursive: bool,
+    db_name_override: Option<&str>,
+    schema_override: Option<&str>,
+    mut log: F,
+) -> Result<ImportIntStats, String> {
     let conn = db::open(db_path).map_err(|e| e.to_string())?;
-    let mut total_count = 0;
-    let mut total_skipped = 0;
+    let mut total_count = 0usize;
+    let mut total_skipped = 0usize;
 
     for dir in dirs {
         let canonical_dir = std::fs::canonicalize(dir)
@@ -45,10 +67,10 @@ pub fn do_import_int(
             .unwrap_or_else(|_| dir.to_string_lossy().into_owned());
 
         let files = collect_int_files(dir, recursive);
-        println!(
+        log(&format!(
             "importing from: {canonical_dir}  ({} .INT files)",
             files.len()
-        );
+        ));
 
         let mut count = 0;
         let mut skipped = 0;
@@ -61,7 +83,6 @@ pub fn do_import_int(
             let source_path = std::fs::canonicalize(&path)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            // For recursive imports, use the file's own directory as source_dir
             let file_dir = path
                 .parent()
                 .and_then(|p| std::fs::canonicalize(p).ok())
@@ -70,7 +91,7 @@ pub fn do_import_int(
             let text = match std::fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!("  skip {file_name}: {e}");
+                    log(&format!("  skip {file_name}: {e}"));
                     skipped += 1;
                     continue;
                 }
@@ -90,27 +111,38 @@ pub fn do_import_int(
                         }
                     }
                     db::upsert_table(&conn, &parsed).map_err(|e| e.to_string())?;
-                    println!(
+                    log(&format!(
                         "  {:30} → {}.{}.{}",
                         file_name, parsed.db_name, parsed.schema_name, parsed.table_name
-                    );
+                    ));
                     count += 1;
                 }
                 Err(e) => {
-                    eprintln!("  skip {file_name}: {e}");
+                    log(&format!("  skip {file_name}: {e}"));
                     skipped += 1;
                 }
             }
         }
-        println!("  {count} imported, {skipped} skipped");
+        log(&format!("  {count} imported, {skipped} skipped"));
         total_count += count;
         total_skipped += skipped;
     }
 
     if dirs.len() > 1 {
-        println!("total: {total_count} imported, {total_skipped} skipped");
+        log(&format!(
+            "total: {total_count} imported, {total_skipped} skipped"
+        ));
     }
-    Ok(())
+    Ok(ImportIntStats {
+        imported: total_count,
+        skipped: total_skipped,
+    })
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct ImportIntStats {
+    pub imported: usize,
+    pub skipped: usize,
 }
 
 pub fn do_import_mds(db_path: &Path, file: &Path) -> Result<(), String> {

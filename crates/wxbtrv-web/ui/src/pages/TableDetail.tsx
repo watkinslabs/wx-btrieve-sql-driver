@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronLeft, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { api, type BrowseResult, type TableDetail } from "@/api";
+import { AlertTriangle, CheckCircle2, ChevronLeft, Loader2, Plus, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { api, type BrowseResult, type DiffResult, type TableDetail } from "@/api";
 
 const TYPE_NAMES: Record<number, string> = {
   0: "STRING",
@@ -213,7 +213,154 @@ export function TableDetailPage() {
         <AddIndexForm tableName={name} onAdded={reload} />
       </section>
 
+      <SchemaDiffPanel tableName={name} />
       <RowBrowser tableName={name} />
+    </div>
+  );
+}
+
+function SchemaDiffPanel({ tableName }: { tableName: string }) {
+  const [data, setData] = useState<DiffResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [section, setSection] = useState("");
+
+  async function load() {
+    setBusy(true);
+    setErr(null);
+    try {
+      setData(await api.diffTable(tableName, section || undefined));
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+      setData(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const diffOk =
+    data &&
+    data.backend_table_exists &&
+    data.missing_in_backend.length === 0 &&
+    data.extra_in_backend.length === 0 &&
+    data.type_mismatches.length === 0;
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold uppercase tracking-wide pb-2">Schema diff</h2>
+      <div className="rounded-md border border-zinc-200 dark:border-zinc-800 p-3 space-y-3">
+        <div className="flex flex-wrap items-end gap-3 text-sm">
+          <label>
+            <span className="block pb-1 text-xs text-zinc-500">Section override</span>
+            <input
+              className="rounded-md border border-zinc-300 bg-white p-1.5 text-sm dark:bg-zinc-900 dark:border-zinc-700"
+              placeholder="(auto from source_dir)"
+              value={section}
+              onChange={(e) => setSection(e.target.value)}
+            />
+          </label>
+          <button
+            className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-50 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            onClick={load}
+            disabled={busy}
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            {data ? "Refresh" : "Compare"}
+          </button>
+          {data && (
+            <span className="text-xs text-zinc-500">
+              {data.backend} · {data.table_ref}
+            </span>
+          )}
+        </div>
+
+        {err && (
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:bg-red-950 dark:border-red-800 dark:text-red-200">
+            <XCircle className="mr-1 inline h-4 w-4" />
+            {err}
+          </div>
+        )}
+
+        {data && !data.backend_table_exists && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950 dark:border-amber-800 dark:text-amber-200">
+            <AlertTriangle className="mr-1 inline h-4 w-4" />
+            Table doesn't exist on the backend yet. Generate DDL on the Tools page or
+            run a .B import with <code>CREATE TABLE</code> to create it.
+          </div>
+        )}
+
+        {data && data.backend_table_exists && diffOk && (
+          <div className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-200">
+            <CheckCircle2 className="mr-1 inline h-4 w-4" />
+            All {data.matched.length} project columns match the backend schema.
+          </div>
+        )}
+
+        {data && data.backend_table_exists && !diffOk && (
+          <div className="space-y-3 text-sm">
+            <DiffList
+              title="Missing in backend"
+              items={data.missing_in_backend}
+              tone="red"
+              hint="These columns are in the project schema but not in the backend table. Re-run DDL generation or ALTER TABLE manually."
+            />
+            <DiffList
+              title="Extra in backend"
+              items={data.extra_in_backend}
+              tone="amber"
+              hint="The backend has columns the project doesn't. Either add them to the project schema or drop them on the server."
+            />
+            {data.type_mismatches.length > 0 && (
+              <div>
+                <div className="font-medium text-amber-700 dark:text-amber-300">Type mismatches</div>
+                <ul className="mt-1 rounded-md border border-amber-300 dark:border-amber-800 divide-y divide-amber-200 dark:divide-amber-900">
+                  {data.type_mismatches.map((m) => (
+                    <li key={m.name} className="p-2">
+                      <code className="font-medium">{m.name}</code> — expected{" "}
+                      <code>{m.expected}</code>, got <code>{m.actual}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {data.matched.length > 0 && (
+              <DiffList title={`Matched (${data.matched.length})`} items={data.matched} tone="emerald" hint="" />
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DiffList({
+  title,
+  items,
+  tone,
+  hint,
+}: {
+  title: string;
+  items: string[];
+  tone: "red" | "amber" | "emerald";
+  hint: string;
+}) {
+  if (items.length === 0) return null;
+  const colors = {
+    red: "border-red-300 dark:border-red-800 text-red-700 dark:text-red-300",
+    amber: "border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300",
+    emerald: "border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300",
+  }[tone];
+  return (
+    <div>
+      <div className={`font-medium ${colors.split(" ").slice(2).join(" ")}`}>{title}</div>
+      {hint && <div className="text-xs text-zinc-500">{hint}</div>}
+      <ul className={`mt-1 rounded-md border ${colors} text-sm`}>
+        {items.map((n) => (
+          <li key={n} className="p-1.5 px-2 border-b last:border-0 border-inherit">
+            <code>{n}</code>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -226,23 +373,53 @@ function RowBrowser({ tableName }: { tableName: string }) {
   const [offset, setOffset] = useState(0);
   const [section, setSection] = useState("");
 
-  async function load() {
+  async function load(at?: number) {
     setBusy(true);
     setErr(null);
+    const useOffset = at ?? offset;
     try {
-      setData(
-        await api.browseRows(tableName, {
-          limit,
-          offset,
-          section: section || undefined,
-        }),
-      );
+      const result = await api.browseRows(tableName, {
+        limit,
+        offset: useOffset,
+        section: section || undefined,
+      });
+      setData(result);
+      if (at !== undefined) setOffset(at);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
       setData(null);
     } finally {
       setBusy(false);
     }
+  }
+  async function next() {
+    await load(offset + limit);
+  }
+  async function prev() {
+    await load(Math.max(0, offset - limit));
+  }
+  function downloadCsv() {
+    if (!data) return;
+    const escape = (v: string | null) => {
+      if (v === null) return "";
+      const needsQuote = /[",\r\n]/.test(v);
+      const escaped = v.replace(/"/g, '""');
+      return needsQuote ? `"${escaped}"` : escaped;
+    };
+    const lines: string[] = [];
+    lines.push(data.columns.map((c) => escape(c)).join(","));
+    for (const row of data.rows) {
+      lines.push(row.map(escape).join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${tableName}_${offset}-${offset + data.rows.length}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -279,17 +456,40 @@ function RowBrowser({ tableName }: { tableName: string }) {
           </label>
           <button
             className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-50 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-            onClick={load}
+            onClick={() => load(0)}
             disabled={busy}
           >
             {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
             {data ? "Refresh" : "Load"}
           </button>
           {data && (
-            <span className="text-xs text-zinc-500">
-              {data.backend} · {data.table_ref}
-              {data.truncated && ` · truncated to ${limit}`}
-            </span>
+            <>
+              <button
+                className="rounded-md border border-zinc-300 px-2 py-1.5 text-xs disabled:opacity-50 dark:border-zinc-700"
+                onClick={prev}
+                disabled={busy || offset === 0}
+              >
+                ← Prev
+              </button>
+              <button
+                className="rounded-md border border-zinc-300 px-2 py-1.5 text-xs disabled:opacity-50 dark:border-zinc-700"
+                onClick={next}
+                disabled={busy || !data.truncated}
+              >
+                Next →
+              </button>
+              <button
+                className="rounded-md border border-zinc-300 px-2 py-1.5 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                onClick={downloadCsv}
+              >
+                Download CSV
+              </button>
+              <span className="text-xs text-zinc-500">
+                {data.backend} · {data.table_ref}
+                {` · rows ${offset + 1}–${offset + data.rows.length}`}
+                {data.truncated && " (more available)"}
+              </span>
+            </>
           )}
         </div>
 

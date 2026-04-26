@@ -6,8 +6,14 @@
 //! the wrapped functions ends up on the server console — the client
 //! only sees an `{ok,message}` summary.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    response::sse::{Event, KeepAlive, Sse},
+    Json,
+};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 use crate::state::{ApiError, AppState};
@@ -78,6 +84,55 @@ pub async fn import_int(
 #[derive(Deserialize)]
 pub struct PathRequest {
     pub path: String,
+}
+
+/// Streaming variant — emits an SSE `log` event per progress line and
+/// finishes with a `done` event carrying the import counts.
+pub async fn import_int_stream(
+    State(state): State<AppState>,
+    Json(req): Json<ImportIntRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let p = db_path(&state)?;
+    let dirs: Vec<PathBuf> = req.dirs.into_iter().map(PathBuf::from).collect();
+    let recursive = req.recursive.unwrap_or(false);
+    let db = req.db;
+    let schema = req.schema;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let tx_log = tx.clone();
+    let tx_end = tx.clone();
+    std::thread::spawn(move || {
+        let result = db_config::commands::import::do_import_int_with_logger(
+            &p,
+            &dirs,
+            recursive,
+            db.as_deref(),
+            schema.as_deref(),
+            |line| {
+                let _ = tx_log.send(Event::default().event("log").data(line.to_string()));
+            },
+        );
+        let final_evt = match result {
+            Ok(stats) => Event::default()
+                .event("done")
+                .json_data(serde_json::json!({
+                    "imported": stats.imported,
+                    "skipped": stats.skipped,
+                })),
+            Err(e) => Event::default().event("error").json_data(serde_json::json!({ "error": e })),
+        };
+        if let Ok(evt) = final_evt {
+            let _ = tx_end.send(evt);
+        }
+        drop(tx_end);
+    });
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(evt) = rx.recv().await {
+            yield Ok::<_, Infallible>(evt);
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 pub async fn import_mds(

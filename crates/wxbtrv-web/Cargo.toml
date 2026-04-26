@@ -36,8 +36,16 @@ async-stream        = "0.3"
 
 # Open the system browser at startup
 opener          = "0.7"
-# Native open/save/folder picker (talks to GTK/AppKit/Win32 via the
-# server-side process; fine because the UI runs against localhost).
-rfd             = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 # OS-appropriate config dir for ~/.config/wxbtrv-web/recent.json
 dirs            = "5"
+
+# Native open/save/folder picker (talks to GTK/AppKit/Win32 via the
+# server-side process; fine because the UI runs against localhost).
+# Linux uses the xdg-portal feature (D-Bus to xdg-desktop-portal) so we
+# don't drag in GTK; Windows + macOS use the default Win32 / AppKit
+# backends which don't need any flags.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = { version = "0.14", features = ["tokio"] }

@@ -92,6 +92,35 @@ export interface TableDetail {
   indexes: IndexRow[];
 }
 
+// ── Schema diff ───────────────────────────────────────────────────────
+
+export interface DiffProjectColumn {
+  name: string;
+  native_type: number;
+  expected_sql_type: string;
+}
+export interface DiffBackendColumn {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+}
+export interface DiffTypeMismatch {
+  name: string;
+  expected: string;
+  actual: string;
+}
+export interface DiffResult {
+  backend: string;
+  table_ref: string;
+  project_columns: DiffProjectColumn[];
+  backend_columns: DiffBackendColumn[];
+  matched: string[];
+  missing_in_backend: string[];
+  extra_in_backend: string[];
+  type_mismatches: DiffTypeMismatch[];
+  backend_table_exists: boolean;
+}
+
 // ── Data browser ──────────────────────────────────────────────────────
 
 export interface BrowseResult {
@@ -181,6 +210,10 @@ export const api = {
   listTables: () => jsonFetch<TableSummary[]>("/api/tables"),
   showTable: (name: string) =>
     jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
+  diffTable: (name: string, section?: string) => {
+    const qs = section ? `?section=${encodeURIComponent(section)}` : "";
+    return jsonFetch<DiffResult>(`/api/tables/${encodeURIComponent(name)}/diff${qs}`);
+  },
   browseRows: (name: string, opts: { limit?: number; offset?: number; section?: string } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
@@ -244,9 +277,20 @@ export interface MigrationRow {
   target_db: string;
 }
 
+export interface ImportIntStats {
+  imported: number;
+  skipped: number;
+}
+
 export const workflow = {
   importInt: (dirs: string[], opts: { recursive?: boolean; db?: string; schema?: string } = {}) =>
     post<OpResult>("/api/import/int", { dirs, ...opts }),
+  importIntStream: (
+    dirs: string[],
+    opts: { recursive?: boolean; db?: string; schema?: string },
+    handlers: StreamHandlers<ImportIntStats>,
+    signal?: AbortSignal,
+  ) => streamPost<ImportIntStats>("/api/import/int/stream", { dirs, ...opts }, handlers, signal),
   importMds: (path: string) => post<OpResult>("/api/import/mds", { path }),
   analyzeB: (path: string, table_name?: string) =>
     post<OpResult>("/api/import/analyze-b", { path, table_name }),
@@ -325,16 +369,16 @@ export const bimport = {
 
 // ── SSE: streaming variants of the .B importers ───────────────────────
 
-export interface StreamHandlers {
+export interface StreamHandlers<T = unknown> {
   onLog?: (line: string) => void;
-  onDone?: (stats: BImportStats) => void;
+  onDone?: (stats: T) => void;
   onError?: (msg: string) => void;
 }
 
-async function streamPost(
+async function streamPost<T = unknown>(
   path: string,
   body: unknown,
-  handlers: StreamHandlers,
+  handlers: StreamHandlers<T>,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(path, {
@@ -371,7 +415,7 @@ async function streamPost(
         handlers.onLog?.(ev.data);
       } else if (ev.event === "done") {
         try {
-          handlers.onDone?.(JSON.parse(ev.data) as BImportStats);
+          handlers.onDone?.(JSON.parse(ev.data) as T);
         } catch {
           handlers.onError?.("malformed done payload");
         }
@@ -401,15 +445,25 @@ function parseSseFrame(frame: string): { event: string; data: string } | null {
 }
 
 export const bimportStream = {
-  importFiles: (files: string[], options: BImportOptions, handlers: StreamHandlers, signal?: AbortSignal) =>
-    streamPost("/api/bimport/files/stream", { files, ...options }, handlers, signal),
+  importFiles: (
+    files: string[],
+    options: BImportOptions,
+    handlers: StreamHandlers<BImportStats>,
+    signal?: AbortSignal,
+  ) => streamPost<BImportStats>("/api/bimport/files/stream", { files, ...options }, handlers, signal),
   importDir: (
     dir: string,
     recursive: boolean,
     options: BImportOptions,
-    handlers: StreamHandlers,
+    handlers: StreamHandlers<BImportStats>,
     signal?: AbortSignal,
-  ) => streamPost("/api/bimport/dir/stream", { dir, recursive, ...options }, handlers, signal),
+  ) =>
+    streamPost<BImportStats>(
+      "/api/bimport/dir/stream",
+      { dir, recursive, ...options },
+      handlers,
+      signal,
+    ),
 };
 
 // SQLite filter shared by Open/Create wxbtrv.db pickers.

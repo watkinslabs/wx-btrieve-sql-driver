@@ -178,11 +178,22 @@ jobs:
 
   # ── wxbtrv-web: builds the React UI bundle + Rust binary ────────────────
   build-web:
-    name: Build wxbtrv-web
-    runs-on: ubuntu-latest
+    name: Build wxbtrv-web (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: wxbtrv-web-linux-x86_64
+            bin: wxbtrv-web
+          - os: windows-latest
+            artifact: wxbtrv-web-windows-x86_64
+            bin: wxbtrv-web.exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install build deps (unixODBC + dbus for rfd)
+      - name: Install Linux build deps (unixODBC + dbus for rfd)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y unixodbc-dev libdbus-1-dev pkg-config
       - uses: actions/setup-node@v4
         with:
@@ -195,15 +206,15 @@ jobs:
             ~/.cargo/git
             target
             crates/wxbtrv-web/ui/node_modules
-          key: cargo-web-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'crates/wxbtrv-web/ui/package*.json') }}
-          restore-keys: cargo-web-${{ runner.os }}-
+          key: cargo-web-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock', 'crates/wxbtrv-web/ui/package*.json') }}
+          restore-keys: cargo-web-${{ matrix.os }}-
       - name: Build wxbtrv-web (release, embeds React UI)
         run: cargo build --release -p wxbtrv-web
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wxbtrv-web-linux-x86_64
-          path: target/release/wxbtrv-web
+          name: ${{ matrix.artifact }}
+          path: target/release/${{ matrix.bin }}
 
   # ── Lint: format + clippy on host target ─────────────────────────────────
   lint:

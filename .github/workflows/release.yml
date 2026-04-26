@@ -22,8 +22,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build the Windows wxbtrv-web binary in parallel — the main release
+  # job (Linux) then downloads it as an artifact and bundles it.
+  web-windows:
+    name: Build wxbtrv-web (windows-x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            crates/wxbtrv-web/ui/node_modules
+          key: cargo-web-windows-${{ hashFiles('**/Cargo.lock', 'crates/wxbtrv-web/ui/package*.json') }}
+          restore-keys: cargo-web-windows-
+      - name: Build wxbtrv-web (release, embeds React UI)
+        run: cargo build --release -p wxbtrv-web
+      - name: Upload wxbtrv-web.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxbtrv-web-windows-x86_64
+          path: target/release/wxbtrv-web.exe
+
   release:
     name: Bump, build, and publish release
+    needs: [web-windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -112,13 +141,21 @@ jobs:
           BTR_IMPORT_EXE: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/btr-import.exe
         run: cargo build --release --target i686-pc-windows-gnu -p installer
 
-      # Three shipped artifacts:
+      - name: Download Windows wxbtrv-web artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wxbtrv-web-windows-x86_64
+          path: web-windows
+
+      # Four shipped artifacts:
       #   wlbtr-installer-${TAG}-windows-i686.exe — drops wxbtrv.dll, wxbtrv.sys,
       #     db_config.exe, btr-import.exe via embedded include_bytes!.
       #   wlbtr-tools-${TAG}-linux-x86_64.tar.gz  — db-config + btr-import
       #     standalone CLIs for managing wxbtrv.db on a Linux dev box.
       #   wxbtrv-web-${TAG}-linux-x86_64.tar.gz   — single-binary local web UI
       #     (React bundle is embedded via rust-embed).
+      #   wxbtrv-web-${TAG}-windows-x86_64.zip    — same UI, Windows build
+      #     produced by the parallel windows-latest job above.
       - name: Stage release artifacts
         run: |
           set -euo pipefail
@@ -135,6 +172,8 @@ jobs:
 
           cp "$NAT/wxbtrv-web"  "staging-web/wxbtrv-web"
           tar -C staging-web -czf "dist/wxbtrv-web-${TAG}-linux-x86_64.tar.gz" wxbtrv-web
+
+          (cd web-windows && zip -j "${GITHUB_WORKSPACE}/dist/wxbtrv-web-${TAG}-windows-x86_64.zip" wxbtrv-web.exe)
 
           (cd dist && sha256sum * > SHA256SUMS)
           ls -lh dist/

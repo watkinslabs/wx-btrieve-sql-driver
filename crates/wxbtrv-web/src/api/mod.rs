@@ -12,6 +12,7 @@ use crate::{embed, state::AppState};
 mod bimport;
 mod browser;
 mod connections;
+mod diff;
 mod fs;
 mod project;
 mod schema;
@@ -54,8 +55,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tables/:name/indexes", post(schema::add_index))
         .route("/tables/:name/indexes/:num", axum::routing::delete(schema::rm_index))
         .route("/tables/:name/rows", get(browser::rows))
+        .route("/tables/:name/diff", get(diff::diff))
         // workflow: imports, exports, migration tracking
         .route("/import/int", post(workflow::import_int))
+        .route("/import/int/stream", post(workflow::import_int_stream))
         .route("/import/mds", post(workflow::import_mds))
         .route("/import/analyze-b", post(workflow::analyze_b))
         .route("/export/int", post(workflow::export_int))
