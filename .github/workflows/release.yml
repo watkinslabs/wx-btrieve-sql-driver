@@ -37,10 +37,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Install build deps (mingw + nasm + unixODBC)
+      - name: Install build deps (mingw + nasm + unixODBC + dbus for rfd)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-i686 nasm unixodbc-dev
+          sudo apt-get install -y gcc-mingw-w64-i686 nasm unixodbc-dev libdbus-1-dev pkg-config
+
+      - name: Set up Node (for wxbtrv-web UI bundle)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Rust toolchain (stable + i686-pc-windows-gnu)
         uses: dtolnay/rust-toolchain@stable
@@ -94,6 +99,9 @@ jobs:
       - name: Build native CLIs (Linux)
         run: cargo build --release -p db-config -p btr-import
 
+      - name: Build wxbtrv-web (Linux, embeds React UI)
+        run: cargo build --release -p wxbtrv-web
+
       # Installer must build LAST and with payload env vars set so its
       # build.rs embeds the prebuilt DLL/sys/CLIs as include_bytes!.
       - name: Build Windows installer (with bundled payloads)
@@ -104,24 +112,29 @@ jobs:
           BTR_IMPORT_EXE: ${{ github.workspace }}/target/i686-pc-windows-gnu/release/btr-import.exe
         run: cargo build --release --target i686-pc-windows-gnu -p installer
 
-      # Two shipped artifacts only:
+      # Three shipped artifacts:
       #   wlbtr-installer-${TAG}-windows-i686.exe — drops wxbtrv.dll, wxbtrv.sys,
       #     db_config.exe, btr-import.exe via embedded include_bytes!.
       #   wlbtr-tools-${TAG}-linux-x86_64.tar.gz  — db-config + btr-import
       #     standalone CLIs for managing wxbtrv.db on a Linux dev box.
+      #   wxbtrv-web-${TAG}-linux-x86_64.tar.gz   — single-binary local web UI
+      #     (React bundle is embedded via rust-embed).
       - name: Stage release artifacts
         run: |
           set -euo pipefail
           TAG="${{ steps.bump.outputs.tag }}"
           WIN=target/i686-pc-windows-gnu/release
           NAT=target/release
-          mkdir -p dist staging-linux
+          mkdir -p dist staging-linux staging-web
 
           cp "$WIN/installer.exe" "dist/wlbtr-installer-${TAG}-windows-i686.exe"
 
           cp "$NAT/db_config"   "staging-linux/db-config"
           cp "$NAT/btr-import"  "staging-linux/btr-import"
           tar -C staging-linux -czf "dist/wlbtr-tools-${TAG}-linux-x86_64.tar.gz" db-config btr-import
+
+          cp "$NAT/wxbtrv-web"  "staging-web/wxbtrv-web"
+          tar -C staging-web -czf "dist/wxbtrv-web-${TAG}-linux-x86_64.tar.gz" wxbtrv-web
 
           (cd dist && sha256sum * > SHA256SUMS)
           ls -lh dist/

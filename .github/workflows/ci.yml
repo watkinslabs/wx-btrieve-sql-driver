@@ -176,6 +176,35 @@ jobs:
           name: wxbtrv-dll-release
           path: target/i686-pc-windows-gnu/release/wxbtrv.dll
 
+  # ── wxbtrv-web: builds the React UI bundle + Rust binary ────────────────
+  build-web:
+    name: Build wxbtrv-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps (unixODBC + dbus for rfd)
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev libdbus-1-dev pkg-config
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            crates/wxbtrv-web/ui/node_modules
+          key: cargo-web-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'crates/wxbtrv-web/ui/package*.json') }}
+          restore-keys: cargo-web-${{ runner.os }}-
+      - name: Build wxbtrv-web (release, embeds React UI)
+        run: cargo build --release -p wxbtrv-web
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxbtrv-web-linux-x86_64
+          path: target/release/wxbtrv-web
+
   # ── Lint: format + clippy on host target ─────────────────────────────────
   lint:
     name: Format + Clippy
