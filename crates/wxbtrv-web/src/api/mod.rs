@@ -13,6 +13,7 @@ mod connections;
 mod fs;
 mod project;
 mod tables;
+mod workflow;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -41,6 +42,16 @@ pub fn router(state: AppState) -> Router {
         // tables
         .route("/tables", get(tables::list_tables))
         .route("/tables/:name", get(tables::show_table))
+        // workflow: imports, exports, migration tracking
+        .route("/import/int", post(workflow::import_int))
+        .route("/import/mds", post(workflow::import_mds))
+        .route("/import/analyze-b", post(workflow::analyze_b))
+        .route("/export/int", post(workflow::export_int))
+        .route("/export/mds", post(workflow::export_mds))
+        .route("/export/ddl", post(workflow::export_ddl))
+        .route("/migration/status", get(workflow::migration_status))
+        .route("/migration/mark", post(workflow::mark_migrated))
+        .route("/migration/clear", post(workflow::clear_migrated))
         .with_state(state);
 
     Router::new()

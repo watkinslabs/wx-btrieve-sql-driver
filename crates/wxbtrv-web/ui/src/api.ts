@@ -173,6 +173,44 @@ export const api = {
     jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
 };
 
+// ── Workflow (imports, exports, migration) ────────────────────────────
+
+export interface OpResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface MigrationRow {
+  table_name: string;
+  source_dir: string;
+  field_count: number;
+  migrated: boolean;
+  migrated_at: string | null;
+  row_count: number | null;
+  target_db: string;
+}
+
+export const workflow = {
+  importInt: (dirs: string[], opts: { recursive?: boolean; db?: string; schema?: string } = {}) =>
+    post<OpResult>("/api/import/int", { dirs, ...opts }),
+  importMds: (path: string) => post<OpResult>("/api/import/mds", { path }),
+  analyzeB: (path: string, table_name?: string) =>
+    post<OpResult>("/api/import/analyze-b", { path, table_name }),
+  exportInt: (out_dir: string, tables: string[] = []) =>
+    post<OpResult>("/api/export/int", { out_dir, tables }),
+  exportMds: (path: string) => post<OpResult>("/api/export/mds", { path }),
+  exportDdl: (out: string, opts: { add_recnum?: boolean; tables?: string[] } = {}) =>
+    post<OpResult>("/api/export/ddl", { out, tables: [], ...opts }),
+  migrationStatus: () => jsonFetch<MigrationRow[]>("/api/migration/status"),
+  markMigrated: (body: {
+    table: string;
+    rows?: number;
+    server?: string;
+    target_db?: string;
+  }) => post<OpResult>("/api/migration/mark", body),
+  clearMigrated: (table: string) => post<OpResult>("/api/migration/clear", { table }),
+};
+
 // SQLite filter shared by Open/Create wxbtrv.db pickers.
 export const WXBTRV_DB_FILTER: FilterSpec = {
   name: "wxbtrv config",
