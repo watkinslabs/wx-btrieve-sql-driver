@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronLeft, Plus, Trash2 } from "lucide-react";
-import { api, type TableDetail } from "@/api";
+import { ChevronLeft, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { api, type BrowseResult, type TableDetail } from "@/api";
 
 const TYPE_NAMES: Record<number, string> = {
   0: "STRING",
@@ -212,7 +212,126 @@ export function TableDetailPage() {
         </ul>
         <AddIndexForm tableName={name} onAdded={reload} />
       </section>
+
+      <RowBrowser tableName={name} />
     </div>
+  );
+}
+
+function RowBrowser({ tableName }: { tableName: string }) {
+  const [data, setData] = useState<BrowseResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [limit, setLimit] = useState(50);
+  const [offset, setOffset] = useState(0);
+  const [section, setSection] = useState("");
+
+  async function load() {
+    setBusy(true);
+    setErr(null);
+    try {
+      setData(
+        await api.browseRows(tableName, {
+          limit,
+          offset,
+          section: section || undefined,
+        }),
+      );
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+      setData(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-sm font-semibold uppercase tracking-wide pb-2">Data preview</h2>
+      <div className="rounded-md border border-zinc-200 dark:border-zinc-800 p-3 space-y-3">
+        <div className="flex flex-wrap items-end gap-3 text-sm">
+          <label>
+            <span className="block pb-1 text-xs text-zinc-500">Limit</span>
+            <input
+              type="number"
+              className="w-20 rounded-md border border-zinc-300 bg-white p-1.5 text-sm dark:bg-zinc-900 dark:border-zinc-700"
+              value={limit}
+              onChange={(e) => setLimit(Math.max(1, Math.min(1000, Number(e.target.value) || 50)))}
+            />
+          </label>
+          <label>
+            <span className="block pb-1 text-xs text-zinc-500">Offset</span>
+            <input
+              type="number"
+              className="w-20 rounded-md border border-zinc-300 bg-white p-1.5 text-sm dark:bg-zinc-900 dark:border-zinc-700"
+              value={offset}
+              onChange={(e) => setOffset(Math.max(0, Number(e.target.value) || 0))}
+            />
+          </label>
+          <label>
+            <span className="block pb-1 text-xs text-zinc-500">Section override</span>
+            <input
+              className="rounded-md border border-zinc-300 bg-white p-1.5 text-sm dark:bg-zinc-900 dark:border-zinc-700"
+              placeholder="(auto from source_dir)"
+              value={section}
+              onChange={(e) => setSection(e.target.value)}
+            />
+          </label>
+          <button
+            className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-50 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            onClick={load}
+            disabled={busy}
+          >
+            {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            {data ? "Refresh" : "Load"}
+          </button>
+          {data && (
+            <span className="text-xs text-zinc-500">
+              {data.backend} · {data.table_ref}
+              {data.truncated && ` · truncated to ${limit}`}
+            </span>
+          )}
+        </div>
+
+        {err && (
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:bg-red-950 dark:border-red-800 dark:text-red-200">
+            {err}
+          </div>
+        )}
+
+        {data && (
+          <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-full text-sm">
+              <thead className="bg-zinc-100 text-left dark:bg-zinc-900">
+                <tr>
+                  {data.columns.map((c) => (
+                    <Th key={c}>{c}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((r, i) => (
+                  <tr key={i} className="border-t border-zinc-200 dark:border-zinc-800">
+                    {r.map((cell, j) => (
+                      <Td key={j} className={cell === null ? "text-zinc-400 italic" : ""}>
+                        {cell === null ? "NULL" : cell}
+                      </Td>
+                    ))}
+                  </tr>
+                ))}
+                {data.rows.length === 0 && (
+                  <tr>
+                    <td className="p-3 text-zinc-500" colSpan={data.columns.length || 1}>
+                      No rows.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

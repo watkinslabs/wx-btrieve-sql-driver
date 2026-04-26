@@ -10,6 +10,7 @@ use tower_http::trace::TraceLayer;
 use crate::{embed, state::AppState};
 
 mod bimport;
+mod browser;
 mod connections;
 mod fs;
 mod project;
@@ -52,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tables/:name/fields/:num", axum::routing::delete(schema::rm_field))
         .route("/tables/:name/indexes", post(schema::add_index))
         .route("/tables/:name/indexes/:num", axum::routing::delete(schema::rm_index))
+        .route("/tables/:name/rows", get(browser::rows))
         // workflow: imports, exports, migration tracking
         .route("/import/int", post(workflow::import_int))
         .route("/import/mds", post(workflow::import_mds))

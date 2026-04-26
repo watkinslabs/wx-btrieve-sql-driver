@@ -92,6 +92,16 @@ export interface TableDetail {
   indexes: IndexRow[];
 }
 
+// ── Data browser ──────────────────────────────────────────────────────
+
+export interface BrowseResult {
+  backend: string;
+  table_ref: string;
+  columns: string[];
+  rows: (string | null)[][];
+  truncated: boolean;
+}
+
 // ── File pickers ──────────────────────────────────────────────────────
 
 export interface FilterSpec {
@@ -171,6 +181,16 @@ export const api = {
   listTables: () => jsonFetch<TableSummary[]>("/api/tables"),
   showTable: (name: string) =>
     jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
+  browseRows: (name: string, opts: { limit?: number; offset?: number; section?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+    if (opts.section) qs.set("section", opts.section);
+    const query = qs.toString();
+    return jsonFetch<BrowseResult>(
+      `/api/tables/${encodeURIComponent(name)}/rows${query ? `?${query}` : ""}`,
+    );
+  },
 
   // Tables (mutations)
   deleteTable: (name: string) =>
