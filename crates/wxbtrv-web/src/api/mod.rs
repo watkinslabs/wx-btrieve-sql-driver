@@ -14,6 +14,7 @@ mod browser;
 mod connections;
 mod diff;
 mod fs;
+mod health;
 mod project;
 mod schema;
 mod tables;
@@ -56,6 +57,9 @@ pub fn router(state: AppState) -> Router {
         .route("/tables/:name/indexes/:num", axum::routing::delete(schema::rm_index))
         .route("/tables/:name/rows", get(browser::rows))
         .route("/tables/:name/diff", get(diff::diff))
+        .route("/tables/:name/diff/apply", post(diff::apply))
+        // health overview — connection + per-table drift + migration
+        .route("/health/overview", get(health::overview))
         // workflow: imports, exports, migration tracking
         .route("/import/int", post(workflow::import_int))
         .route("/import/int/stream", post(workflow::import_int_stream))

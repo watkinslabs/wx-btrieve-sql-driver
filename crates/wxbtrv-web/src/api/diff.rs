@@ -42,6 +42,24 @@ pub struct TypeMismatch {
     pub actual: String,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ApplyParams {
+    pub section: Option<String>,
+    /// Run ALTER TABLE for every missing column. Defaults true.
+    pub add_missing: Option<bool>,
+    /// Run ALTER TABLE DROP COLUMN for every extra column. Defaults
+    /// false — destructive, off by default.
+    pub drop_extra: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ApplyResult {
+    pub backend: String,
+    pub table_ref: String,
+    pub statements: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct DiffResult {
     pub backend: String,
@@ -148,6 +166,99 @@ pub async fn diff(
     .map_err(ApiError::bad_request)?;
 
     Ok(Json(result))
+}
+
+/// POST /api/tables/:name/diff/apply — re-runs the diff, then issues
+/// ALTER TABLE ADD COLUMN for every missing column. With drop_extra=true
+/// also issues DROP COLUMN for backend-only columns. The response lists
+/// every statement attempted plus any per-statement errors.
+pub async fn apply(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ApplyParams>,
+) -> Result<Json<ApplyResult>, ApiError> {
+    let db = state
+        .db_path()
+        .ok_or_else(|| ApiError::not_found("no project open"))?;
+    let add_missing = req.add_missing.unwrap_or(true);
+    let drop_extra = req.drop_extra.unwrap_or(false);
+
+    let result = tokio::task::spawn_blocking(move || -> Result<ApplyResult, String> {
+        let conn = bschema::open_db(&db)?;
+        let int_file = bschema::load_table(&conn, &name)?;
+        let section = req
+            .section
+            .map(|s| s.to_ascii_uppercase())
+            .or_else(|| section_from_source_dir(&int_file.source_dir));
+        let cfg = resolve_config(&conn, section.as_deref())?;
+        let backend = cfg.backend.clone();
+        let mut sql = sqlsrv::connect(&cfg)?;
+        let backend_columns = fetch_backend_columns(&mut sql, &backend, &int_file)?;
+        if backend_columns.is_empty() {
+            return Err(format!(
+                "table {} doesn't exist on the backend — run gen-ddl or .B import with create=true first",
+                int_file.table_name
+            ));
+        }
+        let backend_names: std::collections::HashSet<String> = backend_columns
+            .iter()
+            .map(|c| c.name.to_ascii_uppercase())
+            .collect();
+        let project_names: std::collections::HashSet<String> = int_file
+            .fields
+            .iter()
+            .map(|f| f.name.to_ascii_uppercase())
+            .collect();
+
+        let tref = sqlsrv::table_ref(&backend, &int_file);
+        let mut statements = Vec::new();
+        let mut errors = Vec::new();
+
+        if add_missing {
+            for f in &int_file.fields {
+                if !backend_names.contains(&f.name.to_ascii_uppercase()) {
+                    let col_quoted = quote_for(&backend, &f.name);
+                    let type_str = sqlsrv::sql_type_str(&backend, f, "");
+                    let stmt = format!("ALTER TABLE {tref} ADD COLUMN {col_quoted} {type_str} NULL");
+                    if let Err(e) = sqlsrv::execute(&mut sql, &stmt) {
+                        errors.push(format!("{stmt}\n  -> {e}"));
+                    }
+                    statements.push(stmt);
+                }
+            }
+        }
+        if drop_extra {
+            for c in &backend_columns {
+                if !project_names.contains(&c.name.to_ascii_uppercase()) {
+                    let col_quoted = quote_for(&backend, &c.name);
+                    let stmt = format!("ALTER TABLE {tref} DROP COLUMN {col_quoted}");
+                    if let Err(e) = sqlsrv::execute(&mut sql, &stmt) {
+                        errors.push(format!("{stmt}\n  -> {e}"));
+                    }
+                    statements.push(stmt);
+                }
+            }
+        }
+
+        Ok(ApplyResult {
+            backend,
+            table_ref: tref,
+            statements,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("join: {e}")))?
+    .map_err(ApiError::bad_request)?;
+
+    Ok(Json(result))
+}
+
+fn quote_for(backend: &str, ident: &str) -> String {
+    match backend {
+        "mssql" => format!("[{}]", ident.replace(']', "]]")),
+        _ => format!("\"{}\"", ident.replace('"', "\"\"")),
+    }
 }
 
 fn section_from_source_dir(source_dir: &str) -> Option<String> {

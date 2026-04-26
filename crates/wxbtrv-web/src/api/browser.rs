@@ -21,6 +21,11 @@ pub struct BrowseParams {
     /// Optional override of the source_dir section (e.g. "PACIFIC").
     /// If unset, the table's stored source_dir basename is used.
     pub section: Option<String>,
+    /// Optional WHERE clause body — appended verbatim after `WHERE`.
+    /// This is a developer/operator tool on localhost; the server does
+    /// not sanitize the expression.
+    #[serde(rename = "where")]
+    pub where_clause: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -66,18 +71,26 @@ pub async fn rows(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let where_part = params
+            .where_clause
+            .as_deref()
+            .map(|w| w.trim())
+            .filter(|w| !w.is_empty())
+            .map(|w| format!(" WHERE {w}"))
+            .unwrap_or_default();
         let sql_text = match backend.as_str() {
             "mssql" => format!(
-                "SELECT TOP {} {} FROM {}",
+                "SELECT TOP {} {} FROM {}{}",
                 limit + offset,
                 select_cols,
-                tref
+                tref,
+                where_part,
             ),
             "postgres" | "sqlite" => format!(
-                "SELECT {} FROM {} LIMIT {} OFFSET {}",
-                select_cols, tref, limit, offset
+                "SELECT {} FROM {}{} LIMIT {} OFFSET {}",
+                select_cols, tref, where_part, limit, offset
             ),
-            _ => format!("SELECT {} FROM {}", select_cols, tref),
+            _ => format!("SELECT {} FROM {}{}", select_cols, tref, where_part),
         };
 
         let (rows, observed_cols) = run_query(&mut sql, &sql_text, columns.len())?;

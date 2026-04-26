@@ -9,6 +9,7 @@ import { TableDetailPage } from "./pages/TableDetail";
 import { ToolsPage } from "./pages/Tools";
 import { MigrationPage } from "./pages/Migration";
 import { BImportPage } from "./pages/BImport";
+import { HealthPage } from "./pages/Health";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -18,6 +19,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <Route path="/" element={<App />}>
           <Route index element={<Navigate to="/workbench" replace />} />
           <Route path="workbench" element={<WorkbenchPage />} />
+          <Route path="health" element={<HealthPage />} />
           <Route path="connections" element={<ConnectionsPage />} />
           <Route path="tables" element={<TablesPage />} />
           <Route path="tables/:name" element={<TableDetailPage />} />

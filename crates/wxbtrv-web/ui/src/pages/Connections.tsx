@@ -54,7 +54,7 @@ export function ConnectionsPage() {
         <div className="flex items-center justify-between mb-2">
           <div className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Connections</div>
           <AddDirectoryButton
-            existing={list.map((e) => e.name)}
+            existing={list}
             onAdded={async (name) => {
               await reload();
               setSelected(name);
@@ -371,12 +371,19 @@ function AddDirectoryButton({
   existing,
   onAdded,
 }: {
-  existing: string[];
+  existing: ConnectionEntry[];
   onAdded: (name: string) => void | Promise<void>;
 }) {
-  const taken = useMemo(() => new Set(existing.map((s) => s.toUpperCase())), [existing]);
+  const taken = useMemo(
+    () => new Set(existing.map((e) => e.name.toUpperCase())),
+    [existing],
+  );
+  const cloneable = useMemo(() => existing.map((e) => e.name), [existing]);
+
   async function add() {
-    const raw = prompt("Directory name (e.g. PACIFIC) — overrides apply when DOS opens files in this directory.");
+    const raw = prompt(
+      "Directory name (e.g. PACIFIC) — overrides apply when DOS opens files in this directory.",
+    );
     if (!raw) return;
     const name = raw.trim().toUpperCase();
     if (!name || name === "GLOBAL" || name === "CONFIG") {
@@ -387,11 +394,27 @@ function AddDirectoryButton({
       onAdded(name);
       return;
     }
+    const cloneFrom = cloneable.length
+      ? prompt(
+          `Optional: clone overrides from existing entry?\nLeave blank to start empty.\nKnown: ${cloneable.join(", ")}`,
+        )
+      : null;
     try {
-      await api.upsertConnection(name, { backend: null });
-      // upsert with all-null does nothing — create a sentinel row so it shows up.
-      // Easiest: write an empty SCHEMA row that user can clear later.
-      await api.upsertConnection(name, { schema: "" });
+      if (cloneFrom && cloneFrom.trim()) {
+        const src = await api
+          .getConnection(cloneFrom.trim())
+          .catch(() => null);
+        if (src) {
+          // Copy every set field (passwords are not echoed by the
+          // server; user will need to re-enter them).
+          const fields: ConnectionFields = { ...src.fields, password: undefined };
+          await api.upsertConnection(name, fields);
+        } else {
+          await api.upsertConnection(name, { schema: "" });
+        }
+      } else {
+        await api.upsertConnection(name, { schema: "" });
+      }
       await onAdded(name);
     } catch (e: any) {
       alert(`Error: ${e?.message ?? e}`);
@@ -401,7 +424,7 @@ function AddDirectoryButton({
     <button
       className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
       onClick={add}
-      title="Add per-directory overrides"
+      title="Add per-directory overrides (optionally clone from existing)"
     >
       <Plus className="h-3 w-3" /> Add
     </button>

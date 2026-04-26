@@ -33,6 +33,17 @@ Recent projects are remembered at
 
 ## Pages
 
+### Health
+
+Project-wide cockpit. One section across the top reports the global
+connection test (green if reachable, red if not, with the underlying
+error). Five summary cards: total tables, in-sync, drifted, missing
+on the backend, migrated. The body is a per-table grid showing each
+table's status (✓ in sync, ⚠ drift, ✗ missing on backend, ○ no
+fields), the resolved section, drift counts as `-N +N ~N` (missing /
+extra / type mismatches), row counts, and migration state. Every
+table name is a link straight to its TableDetail.
+
 ### Workbench
 
 Open an existing `wxbtrv.db` or create a fresh one. Native open/save
@@ -54,7 +65,9 @@ per-directory overrides (e.g. `[PACIFIC]` for files opened from
 - **Test** — opens a connection using either the saved values or the
   current draft (so you can validate before saving).
 - **Add** — type the section name (`PACIFIC`, `WAREHOUSE`, etc.) and
-  override only the keys that differ.
+  override only the keys that differ. If other entries already exist,
+  Add can clone fields from one of them as a starting point — passwords
+  aren't echoed by the server, so you'll re-enter that one.
 
 ### Tables
 
@@ -70,10 +83,13 @@ For one table:
 - **Schema diff** — compares the project's column list against the
   actual columns in the configured backend (resolved through the
   per-directory section). Reports matched, missing, extra, and type
-  mismatches. Use it as a migration-readiness check.
+  mismatches. The "Add N missing column(s) to backend" button fires
+  off `ALTER TABLE ADD COLUMN` on the live backend for every column
+  the project has but the backend lacks.
 - **Data preview** — runs `SELECT ... LIMIT N` against the backend
   and renders the rows. Prev / Next pages and a CSV download are one
-  click each.
+  click each. The WHERE input lets you filter — the expression is
+  appended verbatim to the query (localhost-only, no sanitization).
 
 ### Tools
 
@@ -119,7 +135,9 @@ script against it:
 | `POST` | `/api/connections/test` | `{name, draft?}` |
 | `GET`  | `/api/tables` / `/api/tables/:name` | list / detail |
 | `GET`  | `/api/tables/:name/diff` | schema diff vs backend |
-| `GET`  | `/api/tables/:name/rows?limit&offset&section` | row preview |
+| `POST` | `/api/tables/:name/diff/apply` | `{add_missing?, drop_extra?}` ALTER TABLE |
+| `GET`  | `/api/tables/:name/rows?limit&offset&section&where` | row preview |
+| `GET`  | `/api/health/overview` | per-table drift + connection check |
 | `POST` | `/api/import/int/stream` | SSE: log lines + done event |
 | `POST` | `/api/bimport/files/stream`, `/api/bimport/dir/stream` | SSE |
 | `GET`  | `/api/migration/status` | per-table migrated flag |

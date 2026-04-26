@@ -92,6 +92,44 @@ export interface TableDetail {
   indexes: IndexRow[];
 }
 
+// ── Health overview ───────────────────────────────────────────────────
+
+export interface HealthSummary {
+  total: number;
+  in_sync: number;
+  drifted: number;
+  missing_table: number;
+  no_schema: number;
+  migrated: number;
+}
+
+export type TableHealthStatus = "ok" | "drift" | "missing" | "no_schema" | "no_connection";
+
+export interface TableHealth {
+  table_name: string;
+  source_dir: string;
+  field_count: number;
+  has_schema: boolean;
+  backend_table_exists: boolean;
+  columns_match: boolean;
+  missing_in_backend: number;
+  extra_in_backend: number;
+  type_mismatches: number;
+  migrated: boolean;
+  row_count: number | null;
+  section: string;
+  status: TableHealthStatus;
+}
+
+export interface ProjectHealth {
+  path: string | null;
+  connection_ok: boolean | null;
+  connection_message: string;
+  backend: string;
+  tables: TableHealth[];
+  summary: HealthSummary;
+}
+
 // ── Schema diff ───────────────────────────────────────────────────────
 
 export interface DiffProjectColumn {
@@ -109,6 +147,13 @@ export interface DiffTypeMismatch {
   expected: string;
   actual: string;
 }
+export interface ApplyDiffResult {
+  backend: string;
+  table_ref: string;
+  statements: string[];
+  errors: string[];
+}
+
 export interface DiffResult {
   backend: string;
   table_ref: string;
@@ -214,16 +259,25 @@ export const api = {
     const qs = section ? `?section=${encodeURIComponent(section)}` : "";
     return jsonFetch<DiffResult>(`/api/tables/${encodeURIComponent(name)}/diff${qs}`);
   },
-  browseRows: (name: string, opts: { limit?: number; offset?: number; section?: string } = {}) => {
+  applyDiff: (
+    name: string,
+    body: { section?: string; add_missing?: boolean; drop_extra?: boolean } = {},
+  ) => post<ApplyDiffResult>(`/api/tables/${encodeURIComponent(name)}/diff/apply`, body),
+  browseRows: (
+    name: string,
+    opts: { limit?: number; offset?: number; section?: string; where?: string } = {},
+  ) => {
     const qs = new URLSearchParams();
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
     if (opts.section) qs.set("section", opts.section);
+    if (opts.where) qs.set("where", opts.where);
     const query = qs.toString();
     return jsonFetch<BrowseResult>(
       `/api/tables/${encodeURIComponent(name)}/rows${query ? `?${query}` : ""}`,
     );
   },
+  healthOverview: () => jsonFetch<ProjectHealth>("/api/health/overview"),
 
   // Tables (mutations)
   deleteTable: (name: string) =>

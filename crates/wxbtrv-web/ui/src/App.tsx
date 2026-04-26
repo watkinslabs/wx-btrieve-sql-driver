@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Database, FileInput, GitMerge, Hammer, ListTree, Plug, Wrench } from "lucide-react";
+import { Activity, Database, FileInput, GitMerge, Hammer, ListTree, Plug, Wrench } from "lucide-react";
 import { ProjectProvider, useProject } from "@/project";
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -31,6 +31,9 @@ function Shell() {
         </div>
         <NavLink to="/workbench" className={navLinkClass}>
           <Wrench className="h-4 w-4" /> Workbench
+        </NavLink>
+        <NavLink to="/health" className={navLinkClass}>
+          <Activity className="h-4 w-4" /> Health
         </NavLink>
         <NavLink to="/connections" className={navLinkClass}>
           <Plug className="h-4 w-4" /> Connections

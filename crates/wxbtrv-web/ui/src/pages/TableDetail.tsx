@@ -224,15 +224,42 @@ function SchemaDiffPanel({ tableName }: { tableName: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [section, setSection] = useState("");
+  const [applyMsg, setApplyMsg] = useState<string | null>(null);
 
   async function load() {
     setBusy(true);
     setErr(null);
+    setApplyMsg(null);
     try {
       setData(await api.diffTable(tableName, section || undefined));
     } catch (e: any) {
       setErr(String(e?.message ?? e));
       setData(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyMissing() {
+    if (!data) return;
+    if (!confirm(`Run ALTER TABLE ADD COLUMN for ${data.missing_in_backend.length} column(s)?`))
+      return;
+    setBusy(true);
+    setApplyMsg(null);
+    try {
+      const r = await api.applyDiff(tableName, {
+        section: section || undefined,
+        add_missing: true,
+        drop_extra: false,
+      });
+      setApplyMsg(
+        r.errors.length === 0
+          ? `Ran ${r.statements.length} statement(s) successfully.`
+          : `Ran ${r.statements.length} statement(s) — ${r.errors.length} error(s):\n${r.errors.join("\n")}`,
+      );
+      await load();
+    } catch (e: any) {
+      setApplyMsg(`Error: ${e?.message ?? e}`);
     } finally {
       setBusy(false);
     }
@@ -296,13 +323,29 @@ function SchemaDiffPanel({ tableName }: { tableName: string }) {
           </div>
         )}
 
+        {applyMsg && (
+          <pre className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 whitespace-pre-wrap">
+            {applyMsg}
+          </pre>
+        )}
+
         {data && data.backend_table_exists && !diffOk && (
           <div className="space-y-3 text-sm">
+            {data.missing_in_backend.length > 0 && (
+              <button
+                className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                onClick={applyMissing}
+                disabled={busy}
+              >
+                Add {data.missing_in_backend.length} missing column
+                {data.missing_in_backend.length === 1 ? "" : "s"} to backend
+              </button>
+            )}
             <DiffList
               title="Missing in backend"
               items={data.missing_in_backend}
               tone="red"
-              hint="These columns are in the project schema but not in the backend table. Re-run DDL generation or ALTER TABLE manually."
+              hint="These columns are in the project schema but not in the backend table. Click the button above to ALTER TABLE on the live backend."
             />
             <DiffList
               title="Extra in backend"
@@ -372,6 +415,7 @@ function RowBrowser({ tableName }: { tableName: string }) {
   const [limit, setLimit] = useState(50);
   const [offset, setOffset] = useState(0);
   const [section, setSection] = useState("");
+  const [where, setWhere] = useState("");
 
   async function load(at?: number) {
     setBusy(true);
@@ -382,6 +426,7 @@ function RowBrowser({ tableName }: { tableName: string }) {
         limit,
         offset: useOffset,
         section: section || undefined,
+        where: where || undefined,
       });
       setData(result);
       if (at !== undefined) setOffset(at);
@@ -452,6 +497,18 @@ function RowBrowser({ tableName }: { tableName: string }) {
               placeholder="(auto from source_dir)"
               value={section}
               onChange={(e) => setSection(e.target.value)}
+            />
+          </label>
+          <label className="flex-1 min-w-[16rem]">
+            <span className="block pb-1 text-xs text-zinc-500">WHERE</span>
+            <input
+              className="w-full rounded-md border border-zinc-300 bg-white p-1.5 text-sm font-mono dark:bg-zinc-900 dark:border-zinc-700"
+              placeholder='e.g. "ID" > 100'
+              value={where}
+              onChange={(e) => setWhere(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") load(0);
+              }}
             />
           </label>
           <button
