@@ -5,5 +5,6 @@
 //! drive imports from a UI without shelling out.
 
 pub mod bfile;
+pub mod runner;
 pub mod schema;
 pub mod sqlsrv;

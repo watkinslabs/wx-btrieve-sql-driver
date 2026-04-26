@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::{embed, state::AppState};
 
+mod bimport;
 mod connections;
 mod fs;
 mod project;
@@ -61,6 +62,10 @@ pub fn router(state: AppState) -> Router {
         .route("/migration/status", get(workflow::migration_status))
         .route("/migration/mark", post(workflow::mark_migrated))
         .route("/migration/clear", post(workflow::clear_migrated))
+        // .B → backend bulk import
+        .route("/bimport/info", post(bimport::info))
+        .route("/bimport/files", post(bimport::import_files))
+        .route("/bimport/dir", post(bimport::import_dir))
         .with_state(state);
 
     Router::new()

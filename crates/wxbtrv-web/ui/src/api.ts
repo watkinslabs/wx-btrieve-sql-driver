@@ -245,6 +245,64 @@ export const workflow = {
   clearMigrated: (table: string) => post<OpResult>("/api/migration/clear", { table }),
 };
 
+// ── .B → backend bulk import ──────────────────────────────────────────
+
+export interface BImportOptions {
+  create?: boolean;
+  truncate?: boolean;
+  dry_run?: boolean;
+  batch?: number;
+  auto_schema?: boolean;
+  save_schema?: boolean;
+  collation?: string;
+  table?: string;
+}
+
+export interface BImportStats {
+  files_ok: number;
+  files_skipped: number;
+  records: number;
+  log: string[];
+}
+
+export interface BInfoSegment {
+  offset: number;
+  length: number;
+  data_type: number;
+  null_value: number;
+  descending: boolean;
+  allows_dups: boolean;
+}
+
+export interface BInfoKey {
+  number: number;
+  segments: BInfoSegment[];
+}
+
+export interface BInfo {
+  path: string;
+  version: number;
+  page_size: number;
+  logical_rec_len: number;
+  physical_rec_len: number;
+  key_count: number;
+  declared_records: number;
+  page_count: number;
+  file_size: number;
+  active_records: number;
+  uncovered_bytes: number | null;
+  record_kind: string | null;
+  keys: BInfoKey[];
+}
+
+export const bimport = {
+  info: (path: string) => post<BInfo>("/api/bimport/info", { path }),
+  importFiles: (files: string[], options: BImportOptions = {}) =>
+    post<BImportStats>("/api/bimport/files", { files, ...options }),
+  importDir: (dir: string, recursive: boolean, options: BImportOptions = {}) =>
+    post<BImportStats>("/api/bimport/dir", { dir, recursive, ...options }),
+};
+
 // SQLite filter shared by Open/Create wxbtrv.db pickers.
 export const WXBTRV_DB_FILTER: FilterSpec = {
   name: "wxbtrv config",
