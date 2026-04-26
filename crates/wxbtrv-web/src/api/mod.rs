@@ -12,6 +12,7 @@ use crate::{embed, state::AppState};
 mod connections;
 mod fs;
 mod project;
+mod schema;
 mod tables;
 mod workflow;
 
@@ -39,9 +40,17 @@ pub fn router(state: AppState) -> Router {
                 .delete(connections::delete_one),
         )
         .route("/connections/:name/resolved", get(connections::get_resolved))
-        // tables
+        // tables (read + delete)
         .route("/tables", get(tables::list_tables))
-        .route("/tables/:name", get(tables::show_table))
+        .route(
+            "/tables/:name",
+            get(tables::show_table).delete(schema::rm_table),
+        )
+        .route("/tables/:name/prop", post(schema::set_table_prop))
+        .route("/tables/:name/fields", post(schema::add_field))
+        .route("/tables/:name/fields/:num", axum::routing::delete(schema::rm_field))
+        .route("/tables/:name/indexes", post(schema::add_index))
+        .route("/tables/:name/indexes/:num", axum::routing::delete(schema::rm_index))
         // workflow: imports, exports, migration tracking
         .route("/import/int", post(workflow::import_int))
         .route("/import/mds", post(workflow::import_mds))

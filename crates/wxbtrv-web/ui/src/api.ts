@@ -167,10 +167,44 @@ export const api = {
   testConnection: (name: string, draft?: ConnectionFields) =>
     post<TestConnectionResult>("/api/connections/test", { name, draft }),
 
-  // Tables
+  // Tables (read)
   listTables: () => jsonFetch<TableSummary[]>("/api/tables"),
   showTable: (name: string) =>
     jsonFetch<TableDetail>(`/api/tables/${encodeURIComponent(name)}`),
+
+  // Tables (mutations)
+  deleteTable: (name: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/tables/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  setTableProp: (name: string, key: string, value: string) =>
+    post<{ ok: boolean }>(`/api/tables/${encodeURIComponent(name)}/prop`, { key, value }),
+  addField: (
+    table: string,
+    body: {
+      num: number;
+      name: string;
+      native_type: number;
+      length: number;
+      offset: number;
+      index?: number | null;
+      default?: string | null;
+    },
+  ) => post<{ ok: boolean }>(`/api/tables/${encodeURIComponent(table)}/fields`, body),
+  removeField: (table: string, num: number) =>
+    jsonFetch<{ ok: boolean }>(
+      `/api/tables/${encodeURIComponent(table)}/fields/${num}`,
+      { method: "DELETE" },
+    ),
+  addIndex: (
+    table: string,
+    body: { num: number; fields: string; attrs: string; desc: string },
+  ) => post<{ ok: boolean }>(`/api/tables/${encodeURIComponent(table)}/indexes`, body),
+  removeIndex: (table: string, num: number) =>
+    jsonFetch<{ ok: boolean }>(
+      `/api/tables/${encodeURIComponent(table)}/indexes/${num}`,
+      { method: "DELETE" },
+    ),
 };
 
 // ── Workflow (imports, exports, migration) ────────────────────────────
