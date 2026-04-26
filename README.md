@@ -26,6 +26,7 @@ Detailed walkthroughs: [Installation](docs/installation.md), [Web UI](docs/web.m
 
 ## Documentation
 
+- [Migrate](docs/migrate.md) — end-to-end walkthrough: Btrieve → SQL backend → DLL up
 - [Architecture](docs/architecture.md) — call chain, crate layout, implementation status
 - [Installation](docs/installation.md) — step-by-step setup on a Windows target
 - [Web UI](docs/web.md) — the `wxbtrv-web` local server: project file picker, connection editor, schema diff, data browser, .B import
